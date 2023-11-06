@@ -1,0 +1,6 @@
+target/
+rustssm.db
+rustssm.db-shm
+rustssm.db-wal
+.claude
+.idea
