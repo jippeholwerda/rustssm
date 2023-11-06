@@ -18,4 +18,4 @@ serde = "1.0.190"
 slab = "0.4.9"
 
 [build-dependencies]
-bindgen = { version = "0.69.0" }
+bindgen = { version = "0.69.1" }

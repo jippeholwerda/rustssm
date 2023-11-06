@@ -61,8 +61,17 @@ mod generate {
 
         let bindings = bindgen::Builder::default()
             .header("pkcs11.h")
+            .allowlist_function("C_GetFunctionList")
+            // This is needed because no types will be generated if `allowlist_function` is used.
+            // Unsure if this is a bug.
+            .allowlist_type(".*")
+            .allowlist_file(".*")
+            .allowlist_var(".*")
+            // .allowlist_file("pkcs11.h")
+            // .allowlist_file("pkcs11t.h")
+            // .allowlist_file("pkcs11f.h")
             .parse_callbacks(Box::new(CargoCallbacks))
-            .blocklist_type("max_align_t")
+            // .blocklist_type("max_align_t")
             // .generate_cstr(true)
             .derive_debug(true)
             // Finish the builder and generate the bindings.
