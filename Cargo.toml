@@ -1,0 +1,21 @@
+[package]
+name = "rustssm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rustssm"
+crate-type = ["cdylib"]
+
+[dependencies]
+dashmap = "5.5.3"
+once_cell = "1.18.0"
+p256 = { version = "0.13.2", features = ["ecdsa", "std", "serde"] }
+postcard = {  version = "1.0.8", features = ["alloc"] }
+rand = "0.8.5"
+rsa = { version = "0.9.3", features = [ "default", "serde", "sha2"] }
+serde = "1.0.190"
+slab = "0.4.9"
+
+[build-dependencies]
+bindgen = { version = "0.69.0" }
