@@ -1,6 +1,9 @@
 use aes_gcm::aead::Aead;
 use aes_gcm::aead::Payload;
+use aes_gcm::aes::cipher::consts::U32;
+use aes_gcm::aes::Aes256;
 use aes_gcm::Aes256Gcm;
+use aes_gcm::AesGcm;
 use aes_gcm::KeyInit;
 use aes_gcm::Nonce;
 
@@ -699,6 +702,44 @@ fn aes_gcm_encrypt_decrypt_roundtrip() {
     );
     let decrypted = hsm.decrypt(session, &ciphertext).unwrap();
 
+    assert_eq!(decrypted, plaintext);
+}
+
+#[test]
+fn aes_gcm_with_32_byte_iv_roundtrips_and_matches_reference() {
+    // A 32-byte IV is processed by AES-GCM via GHASH rather than the 96-bit
+    // fast path.
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = generate_secret_key(&hsm, session, 32, "aes key");
+    let key_bytes: Vec<u8> = hsm.object_store().unwrap().read(&key).unwrap();
+
+    let iv = [0x17u8; 32];
+    let plaintext = b"attack at dawn";
+    let mechanism = Mechanism::AesGcm {
+        initialization_vector: iv.to_vec(),
+        additional_authenticated_data: vec![],
+    };
+
+    hsm.encrypt_init(session, &mechanism, key.clone()).unwrap();
+    let ciphertext = hsm.encrypt(session, plaintext).unwrap();
+
+    // Cross-check against a reference AES-256-GCM with a 32-byte nonce.
+    let reference = AesGcm::<Aes256, U32>::new_from_slice(&key_bytes).unwrap();
+    let expected = reference
+        .encrypt(
+            Nonce::<U32>::from_slice(&iv),
+            Payload {
+                msg: plaintext,
+                aad: &[],
+            },
+        )
+        .unwrap();
+    assert_eq!(ciphertext, expected);
+
+    // And decrypts back through the HSM.
+    hsm.decrypt_init(session, &mechanism, key).unwrap();
+    let decrypted = hsm.decrypt(session, &ciphertext).unwrap();
     assert_eq!(decrypted, plaintext);
 }
 

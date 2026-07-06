@@ -409,13 +409,14 @@ fn pkcs11_end_to_end() {
     );
 
     // AES-GCM: exercises CK_GCM_PARAMS decoding and the encrypt/decrypt
-    // buffer protocol.
-    let mut iv = [0x42u8; 12];
+    // buffer protocol. Uses a 32-byte IV (the non-96-bit GHASH path) to cover
+    // the relaxed IV-length handling.
+    let mut iv = [0x42u8; 32];
     let aad = b"header";
     let gcm_params = raw::CK_GCM_PARAMS {
         pIv: iv.as_mut_ptr(),
-        ulIvLen: 12,
-        ulIvBits: 96,
+        ulIvLen: iv.len() as raw::CK_ULONG,
+        ulIvBits: (iv.len() * 8) as raw::CK_ULONG,
         pAAD: aad.as_ptr() as *mut u8,
         ulAADLen: aad.len() as raw::CK_ULONG,
         ulTagBits: 128,

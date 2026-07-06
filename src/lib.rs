@@ -1297,8 +1297,9 @@ unsafe fn read_mechanism(pMechanism: raw::CK_MECHANISM_PTR) -> CkResult<Mechanis
 
             let params = *(mechanism.pParameter as *const raw::CK_GCM_PARAMS);
 
-            // Only the standard 96-bit IV and 128-bit tag are supported.
-            if params.pIv.is_null() || params.ulIvLen != 12 || params.ulTagBits != 128 {
+            // A 96-bit (standard) or 256-bit IV and a 128-bit tag are
+            // supported.
+            if params.pIv.is_null() || !matches!(params.ulIvLen, 12 | 32) || params.ulTagBits != 128 {
                 return Err(raw::CKR_MECHANISM_PARAM_INVALID);
             }
 

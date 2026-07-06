@@ -60,8 +60,9 @@ bugs; each item below names the tests it unlocks.
 - [ ] Multipart encryption: `C_EncryptUpdate`/`C_EncryptFinal` and decrypt
       counterparts → `encrypt_decrypt_multipart`,
       `encrypt_decrypt_multipart_already_initialized`
-- [ ] AES-GCM: IV lengths other than 96 bits and tag lengths other than 128
-      (rustssm currently rejects both)
+- [ ] AES-GCM: tag lengths other than 128 bits (rustssm still requires 128).
+      IV lengths: 96-bit and 256-bit (32-byte) are supported; other lengths
+      are rejected with `CKR_MECHANISM_PARAM_INVALID`.
 
 ### Sign / verify
 
@@ -135,11 +136,11 @@ TODOs, roughly in dependency order:
       for `CKM_AES_GCM` (auth-tag failure → `CKR_ENCRYPTED_DATA_INVALID`,
       short ciphertext → `CKR_ENCRYPTED_DATA_LEN_RANGE`). Still 12-byte IV
       only (next item).
-- [ ] **AES-GCM with 32-byte IVs** — nl-wallet passes
-      `random_bytes(32)` as IV; rustssm currently requires exactly 12 bytes.
-      Implement the GCM spec's GHASH-based IV processing for arbitrary IV
-      lengths (the `aes-gcm` crate supports non-96-bit nonce sizes via its
-      `NonceSize` type parameter).
+- [x] **AES-GCM with 32-byte IVs** — nl-wallet passes `random_bytes(32)` as
+      IV. `read_mechanism` now accepts 12- or 32-byte IVs; `signing.rs`
+      dispatches on `(key_len, iv_len)` to a concrete `AesGcm<Aes*, U32>` via
+      a generic `gcm_encrypt`/`gcm_decrypt` helper (nonce size is a
+      compile-time type parameter, so each IV length needs its own type).
 - [ ] **Persistent token state** — PINs, label, and the initialized flag
       live only in memory; objects alone are persisted in SQLite. nl-wallet
       assumes a pre-initialized token it can log into at startup

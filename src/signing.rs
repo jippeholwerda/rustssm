@@ -1,7 +1,11 @@
 use aes_gcm::aead::Aead;
 use aes_gcm::aead::Payload;
+use aes_gcm::aes::cipher::consts::U32;
+use aes_gcm::aes::Aes128;
+use aes_gcm::aes::Aes256;
 use aes_gcm::Aes128Gcm;
 use aes_gcm::Aes256Gcm;
+use aes_gcm::AesGcm;
 use aes_gcm::KeyInit;
 use aes_gcm::Nonce;
 use hmac::Hmac;
@@ -21,6 +25,33 @@ pub type HmacSha256 = Hmac<Sha256>;
 
 /// Length in bytes of an AES-GCM authentication tag.
 pub const AES_GCM_TAG_LENGTH: usize = 16;
+
+/// AES-GCM with a 32-byte initialization vector. AES-GCM's nonce length is a
+/// compile-time type parameter, so each supported IV length needs its own
+/// concrete cipher type; the default `Aes*Gcm` aliases fix it at 12 bytes.
+type Aes128Gcm32 = AesGcm<Aes128, U32>;
+type Aes256Gcm32 = AesGcm<Aes256, U32>;
+
+/// Encrypts under a concrete AES-GCM cipher. The nonce length must match the
+/// cipher's `NonceSize` (callers dispatch on it), so a mismatch here is a
+/// caller bug rather than an input error.
+fn gcm_encrypt<C>(key: &[u8], nonce: &[u8], payload: Payload) -> Option<Vec<u8>>
+where
+    C: KeyInit + Aead,
+{
+    let cipher = C::new_from_slice(key).ok()?;
+    cipher.encrypt(Nonce::<C::NonceSize>::from_slice(nonce), payload).ok()
+}
+
+/// Decrypts under a concrete AES-GCM cipher. A `None` result is an
+/// authentication-tag mismatch (or a ciphertext shorter than the tag).
+fn gcm_decrypt<C>(key: &[u8], nonce: &[u8], payload: Payload) -> Option<Vec<u8>>
+where
+    C: KeyInit + Aead,
+{
+    let cipher = C::new_from_slice(key).ok()?;
+    cipher.decrypt(Nonce::<C::NonceSize>::from_slice(nonce), payload).ok()
+}
 
 pub struct Signature(pub Vec<u8>);
 
@@ -109,15 +140,17 @@ impl Encrypt for Operation {
                 initialization_vector,
                 additional_authenticated_data,
             } => {
-                let nonce = Nonce::from_slice(&initialization_vector);
                 let payload = Payload {
                     msg: data,
                     aad: &additional_authenticated_data,
                 };
+                let iv = &initialization_vector;
 
-                match key.len() {
-                    16 => Aes128Gcm::new_from_slice(&key).ok()?.encrypt(nonce, payload).ok(),
-                    32 => Aes256Gcm::new_from_slice(&key).ok()?.encrypt(nonce, payload).ok(),
+                match (key.len(), iv.len()) {
+                    (16, 12) => gcm_encrypt::<Aes128Gcm>(&key, iv, payload),
+                    (32, 12) => gcm_encrypt::<Aes256Gcm>(&key, iv, payload),
+                    (16, 32) => gcm_encrypt::<Aes128Gcm32>(&key, iv, payload),
+                    (32, 32) => gcm_encrypt::<Aes256Gcm32>(&key, iv, payload),
                     _ => None,
                 }
             }
@@ -134,17 +167,17 @@ impl Decrypt for Operation {
                 initialization_vector,
                 additional_authenticated_data,
             } => {
-                let nonce = Nonce::from_slice(&initialization_vector);
                 let payload = Payload {
                     msg: data,
                     aad: &additional_authenticated_data,
                 };
+                let iv = &initialization_vector;
 
-                // A failure here is an authentication-tag mismatch (or a
-                // ciphertext shorter than the tag), reported to the caller.
-                match key.len() {
-                    16 => Aes128Gcm::new_from_slice(&key).ok()?.decrypt(nonce, payload).ok(),
-                    32 => Aes256Gcm::new_from_slice(&key).ok()?.decrypt(nonce, payload).ok(),
+                match (key.len(), iv.len()) {
+                    (16, 12) => gcm_decrypt::<Aes128Gcm>(&key, iv, payload),
+                    (32, 12) => gcm_decrypt::<Aes256Gcm>(&key, iv, payload),
+                    (16, 32) => gcm_decrypt::<Aes128Gcm32>(&key, iv, payload),
+                    (32, 32) => gcm_decrypt::<Aes256Gcm32>(&key, iv, payload),
                     _ => None,
                 }
             }
