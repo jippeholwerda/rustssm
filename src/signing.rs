@@ -11,13 +11,13 @@ use aes_gcm::Nonce;
 use hmac::Hmac;
 use hmac::Mac;
 use p256::ecdsa;
-use p256::ecdsa::signature::hazmat::PrehashVerifier;
 use rsa::pkcs1v15;
-use rsa::sha2::Sha256;
-use rsa::signature::RandomizedSigner;
-use rsa::signature::SignatureEncoding;
-use rsa::signature::Verifier;
 use rsa::traits::PublicKeyParts;
+use sha2::Sha256;
+use signature::hazmat::PrehashVerifier;
+use signature::RandomizedSigner;
+use signature::SignatureEncoding;
+use signature::Verifier;
 
 use crate::operation::Operation;
 
@@ -40,7 +40,8 @@ where
     C: KeyInit + Aead,
 {
     let cipher = C::new_from_slice(key).ok()?;
-    cipher.encrypt(Nonce::<C::NonceSize>::from_slice(nonce), payload).ok()
+    let nonce = Nonce::<C::NonceSize>::try_from(nonce).ok()?;
+    cipher.encrypt(&nonce, payload).ok()
 }
 
 /// Decrypts under a concrete AES-GCM cipher. A `None` result is an
@@ -50,7 +51,8 @@ where
     C: KeyInit + Aead,
 {
     let cipher = C::new_from_slice(key).ok()?;
-    cipher.decrypt(Nonce::<C::NonceSize>::from_slice(nonce), payload).ok()
+    let nonce = Nonce::<C::NonceSize>::try_from(nonce).ok()?;
+    cipher.decrypt(&nonce, payload).ok()
 }
 
 pub struct Signature(pub Vec<u8>);
@@ -80,12 +82,12 @@ impl Sign for Operation {
         match self {
             Operation::SignRsa { private_key } => {
                 let signing_key = pkcs1v15::SigningKey::<Sha256>::new(*private_key);
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 let signature = signing_key.sign_with_rng(&mut rng, data);
                 Signature(signature.to_bytes().to_vec())
             }
             Operation::SignEcdsa { signing_key } => {
-                let (signature, _) = signing_key.sign_prehash_recoverable(data).unwrap();
+                let (signature, _) = signing_key.sign_prehash_recoverable(data);
                 Signature(signature.to_bytes().to_vec())
             }
             Operation::SignSha256Hmac { mut signing_key } => {

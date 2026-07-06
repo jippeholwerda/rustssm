@@ -652,7 +652,7 @@ fn aes_gcm_encryption_matches_reference_implementation() {
     let cipher = Aes256Gcm::new_from_slice(&key_bytes).unwrap();
     let decrypted = cipher
         .decrypt(
-            Nonce::from_slice(&iv),
+            &Nonce::try_from(&iv[..]).unwrap(),
             Payload {
                 msg: &ciphertext,
                 aad: &aad,
@@ -728,7 +728,7 @@ fn aes_gcm_with_32_byte_iv_roundtrips_and_matches_reference() {
     let reference = AesGcm::<Aes256, U32>::new_from_slice(&key_bytes).unwrap();
     let expected = reference
         .encrypt(
-            Nonce::<U32>::from_slice(&iv),
+            &Nonce::<U32>::try_from(&iv[..]).unwrap(),
             Payload {
                 msg: plaintext,
                 aad: &[],

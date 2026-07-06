@@ -193,8 +193,8 @@ impl ObjectStore {
 
 #[cfg(test)]
 mod tests {
+    use elliptic_curve::Generate;
     use p256::ecdsa;
-    use p256::elliptic_curve::rand_core::OsRng;
 
     use crate::object_store::ObjectStore;
 
@@ -202,7 +202,7 @@ mod tests {
     fn store_read_delete_roundtrip() {
         let store = ObjectStore::in_memory().unwrap();
 
-        let key = ecdsa::SigningKey::random(&mut OsRng);
+        let key = ecdsa::SigningKey::generate();
         let bytes = key.to_bytes().to_vec();
 
         let id = store.write(&bytes, Some(true), Some(String::from("test1"))).unwrap();

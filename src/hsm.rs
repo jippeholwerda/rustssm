@@ -3,16 +3,16 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::RwLock;
 
-use aes_kw::KekAes256;
+use aes_kw::KwpAes256;
 use der::asn1::OctetString;
 use der::Encode;
-use hmac::Mac;
-use once_cell::sync::OnceCell;
+use elliptic_curve::Generate;
+use hmac::KeyInit;
 use p256::ecdsa;
 use p256::ecdsa::VerifyingKey;
-use rand::rngs::OsRng;
 use rsa::RsaPrivateKey;
 use rsa::RsaPublicKey;
 use serde::de::DeserializeOwned;
@@ -45,7 +45,9 @@ use crate::util::random_bytes;
 /// Bounds on caller-controlled sizes. Anything beyond these is a caller bug
 /// and must not drive an allocation or a long-running computation.
 pub const MAX_SECRET_KEY_LENGTH: u64 = 8192;
-pub const MIN_RSA_MODULUS_BITS: u64 = 512;
+/// The `rsa` crate refuses to generate keys below 1024 bits, so that is our
+/// floor too.
+pub const MIN_RSA_MODULUS_BITS: u64 = 1024;
 pub const MAX_RSA_MODULUS_BITS: u64 = 8192;
 
 /// Domain errors. The FFI layer maps each variant onto a `CK_RV` code; this
@@ -169,7 +171,7 @@ pub struct TokenStatus {
 
 pub struct Hsm {
     slots: RwLock<HashMap<SlotId, Arc<RwLock<Slot>>>>,
-    object_store: OnceCell<Arc<ObjectStore>>,
+    object_store: OnceLock<Arc<ObjectStore>>,
     next_session_id: AtomicU64,
     initialized: AtomicBool,
 }
@@ -180,7 +182,7 @@ impl Default for Hsm {
             slots: RwLock::new(HashMap::from_iter(
                 (0..4).map(|i| (SlotId(i), Arc::new(RwLock::new(Slot::default())))),
             )),
-            object_store: OnceCell::new(),
+            object_store: OnceLock::new(),
             next_session_id: AtomicU64::new(1),
             initialized: AtomicBool::new(false),
         }
@@ -228,11 +230,15 @@ impl Hsm {
     }
 
     fn object_store(&self) -> Result<Arc<ObjectStore>> {
-        let store = self
-            .object_store
-            .get_or_try_init(|| ObjectStore::new().map(Arc::new))
-            .map_err(HsmError::ObjectStore)?;
-        Ok(store.clone())
+        // `OnceLock` has no stable fallible initializer, so open the store and
+        // race to install it. A concurrent caller may win, in which case its
+        // value is kept and the loser's connection is simply dropped.
+        if let Some(store) = self.object_store.get() {
+            return Ok(store.clone());
+        }
+        let store = Arc::new(ObjectStore::new().map_err(HsmError::ObjectStore)?);
+        let _ = self.object_store.set(store);
+        Ok(self.object_store.get().expect("object store just initialized").clone())
     }
 
     // ---- slots and tokens ------------------------------------------------
@@ -497,7 +503,7 @@ impl Hsm {
                 }
 
                 // Key generation is slow; run it without holding any lock.
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 let private_key =
                     RsaPrivateKey::new(&mut rng, bits as usize).map_err(|_| HsmError::AttributeValueInvalid)?;
                 let public_key = private_key.to_public_key();
@@ -513,7 +519,7 @@ impl Hsm {
                 Ok((public_id, private_id))
             }
             Mechanism::EcKeyPairGen => {
-                let signing_key = ecdsa::SigningKey::random(&mut OsRng);
+                let signing_key = ecdsa::SigningKey::generate();
                 let private_bytes = signing_key.to_bytes().to_vec();
                 let verifying_key = *signing_key.verifying_key();
 
@@ -547,13 +553,15 @@ impl Hsm {
                     read_handle(&session, &wrapping_key, HsmError::WrappingKeyHandleInvalid)?;
                 let key_bytes: Vec<u8> = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
 
-                let kek: KekAes256 = wrapping_key_bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| HsmError::WrappingKeySizeRange)?;
+                let kek = KwpAes256::new_from_slice(&wrapping_key_bytes).map_err(|_| HsmError::WrappingKeySizeRange)?;
 
-                kek.wrap_with_padding_vec(&key_bytes)
-                    .map_err(|_| HsmError::GeneralError)
+                // AES-KWP output is the plaintext padded up to an 8-byte
+                // boundary plus one 8-byte block.
+                let mut buffer = vec![0u8; key_bytes.len().div_ceil(8) * 8 + 8];
+                let wrapped = kek
+                    .wrap_key(&key_bytes, &mut buffer)
+                    .map_err(|_| HsmError::GeneralError)?;
+                Ok(wrapped.to_vec())
             }
             _ => Err(HsmError::MechanismInvalid),
         }
@@ -575,14 +583,16 @@ impl Hsm {
                 let unwrapping_key_bytes: Vec<u8> =
                     read_handle(&session, &unwrapping_key, HsmError::UnwrappingKeyHandleInvalid)?;
 
-                let kek: KekAes256 = unwrapping_key_bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| HsmError::UnwrappingKeySizeRange)?;
+                let kek =
+                    KwpAes256::new_from_slice(&unwrapping_key_bytes).map_err(|_| HsmError::UnwrappingKeySizeRange)?;
 
+                // Unwrapped output is at most the wrapped length less one
+                // 8-byte block; `unwrap_key` truncates to the true length.
+                let mut buffer = vec![0u8; wrapped_key.len()];
                 let key_bytes = kek
-                    .unwrap_with_padding_vec(wrapped_key)
-                    .map_err(|_| HsmError::WrappedKeyInvalid)?;
+                    .unwrap_key(wrapped_key, &mut buffer)
+                    .map_err(|_| HsmError::WrappedKeyInvalid)?
+                    .to_vec();
 
                 let object_id = session.write_object(&key_bytes, attributes).map_err(store_error)?;
                 Ok(object_id)

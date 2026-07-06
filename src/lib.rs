@@ -24,10 +24,10 @@
 
 use std::ptr;
 use std::slice;
+use std::sync::LazyLock;
 
 use log::debug;
 use log::warn;
-use once_cell::sync::Lazy;
 
 use crate::attribute::Attribute;
 use crate::attribute::AttributeType;
@@ -57,7 +57,7 @@ mod signing;
 mod slot;
 mod util;
 
-static HSM: Lazy<Hsm> = Lazy::new(Hsm::default);
+static HSM: LazyLock<Hsm> = LazyLock::new(Hsm::default);
 
 const MANUFACTURER: &str = "rustssm";
 const LIBRARY_DESCRIPTION: &str = "rustssm software HSM";
