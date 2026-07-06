@@ -1240,6 +1240,7 @@ unsafe fn read_mechanism(pMechanism: raw::CK_MECHANISM_PTR) -> CkResult<Mechanis
 
     match mechanism.mechanism {
         raw::CKM_GENERIC_SECRET_KEY_GEN => Ok(Mechanism::GenericSecretKeyGen),
+        raw::CKM_AES_KEY_GEN => Ok(Mechanism::AesKeyGen),
         raw::CKM_RSA_PKCS_KEY_PAIR_GEN => Ok(Mechanism::RsaPkcsKeyPairGen),
         raw::CKM_EC_KEY_PAIR_GEN => Ok(Mechanism::EcKeyPairGen),
         raw::CKM_RSA_PKCS => Ok(Mechanism::RsaPkcs),

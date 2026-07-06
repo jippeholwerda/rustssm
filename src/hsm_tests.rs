@@ -349,6 +349,68 @@ fn generate_generic_secret_key_roundtrip() {
 }
 
 #[test]
+fn generate_aes_key_produces_usable_key() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    for length in [16, 24, 32] {
+        let key = hsm
+            .generate_key(
+                session,
+                &Mechanism::AesKeyGen,
+                vec![Attribute::ValueLen(length), Attribute::Label(String::from("aes"))],
+            )
+            .unwrap();
+
+        let key_bytes: Vec<u8> = hsm.object_store().unwrap().read(&key).unwrap();
+        assert_eq!(key_bytes.len(), length as usize);
+    }
+}
+
+#[test]
+fn generate_aes_key_rejects_non_aes_lengths() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    for length in [0, 8, 20, 64] {
+        assert!(matches!(
+            hsm.generate_key(session, &Mechanism::AesKeyGen, vec![Attribute::ValueLen(length)]),
+            Err(HsmError::AttributeValueInvalid)
+        ));
+    }
+}
+
+#[test]
+fn generate_aes_key_requires_value_length() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    assert!(matches!(
+        hsm.generate_key(session, &Mechanism::AesKeyGen, vec![]),
+        Err(HsmError::TemplateIncomplete)
+    ));
+}
+
+#[test]
+fn generated_aes_key_encrypts_under_gcm() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let key = hsm
+        .generate_key(session, &Mechanism::AesKeyGen, vec![Attribute::ValueLen(32)])
+        .unwrap();
+
+    let mechanism = Mechanism::AesGcm {
+        initialization_vector: vec![0x24; 12],
+        additional_authenticated_data: vec![],
+    };
+    hsm.encrypt_init(session, &mechanism, key).unwrap();
+    let ciphertext = hsm.encrypt(session, b"secret payload").unwrap();
+
+    assert_eq!(ciphertext.len(), b"secret payload".len() + AES_GCM_TAG_LENGTH);
+}
+
+#[test]
 fn generate_key_requires_value_length() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);

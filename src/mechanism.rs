@@ -4,6 +4,7 @@
 #[derive(Debug)]
 pub enum Mechanism {
     GenericSecretKeyGen,
+    AesKeyGen,
     RsaPkcsKeyPairGen,
     EcKeyPairGen,
     RsaPkcs,

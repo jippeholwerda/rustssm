@@ -31,8 +31,11 @@ bugs; each item below names the tests it unlocks.
 
 ### Key generation mechanisms
 
-- [ ] `CKM_AES_KEY_GEN` — single most-referenced mechanism in the suite
-      (22 uses). → `wrap_and_unwrap_key`, `session_find_objects`,
+- [x] `CKM_AES_KEY_GEN` — single most-referenced mechanism in the suite
+      (22 uses). Generates a 128/192/256-bit key from `CKA_VALUE_LEN`.
+      Most of the referencing tests also need `C_CreateObject`/attribute
+      storage before they go green. → `wrap_and_unwrap_key`,
+      `session_find_objects`,
       `session_objecthandle_iterator`, `aes_key_attributes_test`,
       `encrypt_decrypt*`, `derive_key*`, …
 - [ ] `CKM_EC_EDWARDS_KEY_PAIR_GEN` + `CKM_EDDSA` (Ed25519 and Ed448,
@@ -123,7 +126,7 @@ already works against rustssm:
 
 TODOs, roughly in dependency order:
 
-- [ ] **`CKM_AES_KEY_GEN`** — `generate_aes_encryption_key` creates the
+- [x] **`CKM_AES_KEY_GEN`** — `generate_aes_encryption_key` creates the
       AES-256 encryption/wrapping keys everything else depends on. (Same item
       as in section 1.)
 - [ ] **AES-GCM decrypt** — `decrypt()` needs `C_DecryptInit`/`C_Decrypt`

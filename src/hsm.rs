@@ -402,26 +402,29 @@ impl Hsm {
 
         self.check_writable(&session, &attributes)?;
 
-        match mechanism {
+        let key_len = match mechanism {
             Mechanism::GenericSecretKeyGen => {
-                let key_len = attributes
-                    .iter()
-                    .find_map(|attr| match attr {
-                        Attribute::ValueLen(len) => Some(*len),
-                        _ => None,
-                    })
-                    .ok_or(HsmError::TemplateIncomplete)?;
-
+                let key_len = value_len(&attributes)?;
                 if key_len == 0 || key_len > MAX_SECRET_KEY_LENGTH {
                     return Err(HsmError::AttributeValueInvalid);
                 }
-
-                let key = random_bytes(key_len as usize);
-                let object_id = session.write_object(&key, attributes).map_err(store_error)?;
-                Ok(object_id)
+                key_len
             }
-            _ => Err(HsmError::MechanismInvalid),
-        }
+            Mechanism::AesKeyGen => {
+                // CKM_AES_KEY_GEN takes the key length from CKA_VALUE_LEN;
+                // AES defines exactly three key sizes.
+                let key_len = value_len(&attributes)?;
+                if !matches!(key_len, 16 | 24 | 32) {
+                    return Err(HsmError::AttributeValueInvalid);
+                }
+                key_len
+            }
+            _ => return Err(HsmError::MechanismInvalid),
+        };
+
+        let key = random_bytes(key_len as usize);
+        let object_id = session.write_object(&key, attributes).map_err(store_error)?;
+        Ok(object_id)
     }
 
     /// Generates a key pair, returning `(public, private)` object ids.
@@ -857,6 +860,18 @@ where
         SessionError::ObjectStore(ObjectStoreError::Database(e)) => ObjectStoreError::Database(e).into(),
         _ => invalid,
     })
+}
+
+/// Reads `CKA_VALUE_LEN` (the secret-key length in bytes) from a template,
+/// which every symmetric key-generation mechanism requires.
+fn value_len(attributes: &[Attribute]) -> Result<u64> {
+    attributes
+        .iter()
+        .find_map(|attr| match attr {
+            Attribute::ValueLen(len) => Some(*len),
+            _ => None,
+        })
+        .ok_or(HsmError::TemplateIncomplete)
 }
 
 fn store_error(error: SessionError) -> HsmError {
