@@ -18,9 +18,11 @@ use crate::util::random_string;
 #[derive(Error, Debug)]
 pub enum ObjectStoreError {
     #[error("serialization/deserialization error {0:?}")]
-    Serialize(#[from] postcard::Error),
+    Serialize(#[source] postcard::Error),
+
     #[error("database error {0:?}")]
-    Database(#[from] rusqlite::Error),
+    Database(#[source] rusqlite::Error),
+
     #[error("object not found: {0:?}")]
     NotFound(ObjectId),
 }
@@ -69,10 +71,14 @@ impl ObjectStore {
                 .unwrap_or_default()
         );
 
-        let connection = Connection::open(path)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.execute_batch(SCHEMA)?;
+        let connection = Connection::open(path).map_err(ObjectStoreError::Database)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(ObjectStoreError::Database)?;
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(ObjectStoreError::Database)?;
+        connection.execute_batch(SCHEMA).map_err(ObjectStoreError::Database)?;
 
         Ok(Self {
             connection: Mutex::new(connection),
@@ -81,8 +87,8 @@ impl ObjectStore {
 
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, ObjectStoreError> {
-        let connection = Connection::open_in_memory()?;
-        connection.execute_batch(SCHEMA)?;
+        let connection = Connection::open_in_memory().map_err(ObjectStoreError::Database)?;
+        connection.execute_batch(SCHEMA).map_err(ObjectStoreError::Database)?;
 
         Ok(Self {
             connection: Mutex::new(connection),
@@ -98,16 +104,18 @@ impl ObjectStore {
     where
         T: Serialize + ?Sized,
     {
-        let content = postcard::to_allocvec(&object)?;
+        let content = postcard::to_allocvec(&object).map_err(ObjectStoreError::Serialize)?;
 
         let private = i64::from(private.unwrap_or(false));
         let label = label.unwrap_or_else(|| random_string(16));
 
         let connection = self.connection.lock().unwrap();
-        connection.execute(
-            "insert into object (content, private, label) values (?1, ?2, ?3)",
-            params![content, private, label],
-        )?;
+        connection
+            .execute(
+                "insert into object (content, private, label) values (?1, ?2, ?3)",
+                params![content, private, label],
+            )
+            .map_err(ObjectStoreError::Database)?;
 
         Ok(ObjectId(connection.last_insert_rowid() as u64))
     }
@@ -117,7 +125,7 @@ impl ObjectStore {
         T: DeserializeOwned,
     {
         let content = self.read_raw(object_id)?;
-        let object = postcard::from_bytes(&content)?;
+        let object = postcard::from_bytes(&content).map_err(ObjectStoreError::Serialize)?;
         Ok(object)
     }
 
@@ -129,7 +137,8 @@ impl ObjectStore {
             .query_row("select content from object where id = ?1", params![id], |row| {
                 row.get(0)
             })
-            .optional()?
+            .optional()
+            .map_err(ObjectStoreError::Database)?
             .ok_or_else(|| ObjectStoreError::NotFound(object_id.clone()))
     }
 
@@ -137,7 +146,9 @@ impl ObjectStore {
         let id = object_id.0 as i64;
 
         let connection = self.connection.lock().unwrap();
-        let deleted = connection.execute("delete from object where id = ?1", params![id])?;
+        let deleted = connection
+            .execute("delete from object where id = ?1", params![id])
+            .map_err(ObjectStoreError::Database)?;
 
         if deleted == 0 {
             return Err(ObjectStoreError::NotFound(object_id.clone()));
@@ -149,7 +160,9 @@ impl ObjectStore {
     /// Removes all stored objects. Used when a token is (re)initialized.
     pub fn clear(&self) -> Result<(), ObjectStoreError> {
         let connection = self.connection.lock().unwrap();
-        connection.execute("delete from object", [])?;
+        connection
+            .execute("delete from object", [])
+            .map_err(ObjectStoreError::Database)?;
         Ok(())
     }
 
@@ -167,10 +180,12 @@ impl ObjectStore {
         }
 
         let connection = self.connection.lock().unwrap();
-        let mut statement = connection.prepare(&sql)?;
+        let mut statement = connection.prepare(&sql).map_err(ObjectStoreError::Database)?;
         let ids = statement
-            .query_map(params_from_iter(values), |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+            .query_map(params_from_iter(values), |row| row.get::<_, i64>(0))
+            .map_err(ObjectStoreError::Database)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ObjectStoreError::Database)?;
 
         Ok(ids.into_iter().map(|id| ObjectId(id as u64)).collect())
     }

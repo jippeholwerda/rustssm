@@ -678,6 +678,115 @@ fn aes_gcm_rejects_invalid_key_sizes() {
 }
 
 #[test]
+fn aes_gcm_encrypt_decrypt_roundtrip() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = generate_secret_key(&hsm, session, 32, "aes key");
+
+    let mechanism = Mechanism::AesGcm {
+        initialization_vector: vec![0x42; 12],
+        additional_authenticated_data: b"header".to_vec(),
+    };
+    let plaintext = b"attack at dawn";
+
+    hsm.encrypt_init(session, &mechanism, key.clone()).unwrap();
+    let ciphertext = hsm.encrypt(session, plaintext).unwrap();
+
+    hsm.decrypt_init(session, &mechanism, key).unwrap();
+    assert_eq!(
+        hsm.decrypted_length(session, ciphertext.len() as u64).unwrap(),
+        plaintext.len() as u64
+    );
+    let decrypted = hsm.decrypt(session, &ciphertext).unwrap();
+
+    assert_eq!(decrypted, plaintext);
+}
+
+#[test]
+fn aes_gcm_decrypt_detects_tampering() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = generate_secret_key(&hsm, session, 32, "aes key");
+
+    let mechanism = Mechanism::AesGcm {
+        initialization_vector: vec![0x42; 12],
+        additional_authenticated_data: b"header".to_vec(),
+    };
+
+    hsm.encrypt_init(session, &mechanism, key.clone()).unwrap();
+    let mut ciphertext = hsm.encrypt(session, b"attack at dawn").unwrap();
+    ciphertext[0] ^= 0xFF;
+
+    hsm.decrypt_init(session, &mechanism, key.clone()).unwrap();
+    assert!(matches!(
+        hsm.decrypt(session, &ciphertext),
+        Err(HsmError::EncryptedDataInvalid)
+    ));
+
+    // Decrypting under the wrong AAD must also fail authentication.
+    hsm.encrypt_init(session, &mechanism, key.clone()).unwrap();
+    let ciphertext = hsm.encrypt(session, b"attack at dawn").unwrap();
+    let wrong_aad = Mechanism::AesGcm {
+        initialization_vector: vec![0x42; 12],
+        additional_authenticated_data: b"other".to_vec(),
+    };
+    hsm.decrypt_init(session, &wrong_aad, key).unwrap();
+    assert!(matches!(
+        hsm.decrypt(session, &ciphertext),
+        Err(HsmError::EncryptedDataInvalid)
+    ));
+}
+
+#[test]
+fn decrypt_rejects_ciphertext_shorter_than_tag() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = generate_secret_key(&hsm, session, 32, "aes key");
+
+    let mechanism = Mechanism::AesGcm {
+        initialization_vector: vec![0x42; 12],
+        additional_authenticated_data: vec![],
+    };
+    hsm.decrypt_init(session, &mechanism, key).unwrap();
+
+    assert!(matches!(
+        hsm.decrypted_length(session, (AES_GCM_TAG_LENGTH - 1) as u64),
+        Err(HsmError::EncryptedDataLenRange)
+    ));
+}
+
+#[test]
+fn decrypt_without_init_is_rejected() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    assert!(matches!(
+        hsm.decrypted_length(session, 32),
+        Err(HsmError::OperationNotInitialized)
+    ));
+    assert!(matches!(
+        hsm.decrypt(session, b"data"),
+        Err(HsmError::OperationNotInitialized)
+    ));
+}
+
+#[test]
+fn decrypt_init_rejects_invalid_key_size() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = generate_secret_key(&hsm, session, 24, "wrong size");
+
+    let mechanism = Mechanism::AesGcm {
+        initialization_vector: vec![0x42; 12],
+        additional_authenticated_data: vec![],
+    };
+    assert!(matches!(
+        hsm.decrypt_init(session, &mechanism, key),
+        Err(HsmError::KeySizeRange)
+    ));
+}
+
+#[test]
 fn encrypt_init_rejects_non_encryption_mechanism() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);

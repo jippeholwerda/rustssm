@@ -47,8 +47,10 @@ bugs; each item below names the tests it unlocks.
 
 ### Encrypt / decrypt
 
-- [ ] Decryption in general: `C_DecryptInit`, `C_Decrypt` (currently
-      `CKR_FUNCTION_NOT_SUPPORTED` stubs)
+- [x] Decryption plumbing: `C_DecryptInit`/`C_Decrypt` now dispatch (no
+      longer `CKR_FUNCTION_NOT_SUPPORTED` stubs); AES-GCM decrypt is
+      implemented. Other mechanisms (RSA, AES-CBC/ECB below) still need their
+      decrypt arms.
 - [ ] `CKM_AES_ECB`, `CKM_AES_CBC`, `CKM_AES_CBC_PAD`
       → `aes_cbc_encrypt`, `aes_cbc_pad_encrypt`, `wrap_and_unwrap_key`
 - [ ] `CKM_RSA_PKCS` encrypt/decrypt and `CKM_RSA_PKCS_OAEP`
@@ -129,8 +131,10 @@ TODOs, roughly in dependency order:
 - [x] **`CKM_AES_KEY_GEN`** — `generate_aes_encryption_key` creates the
       AES-256 encryption/wrapping keys everything else depends on. (Same item
       as in section 1.)
-- [ ] **AES-GCM decrypt** — `decrypt()` needs `C_DecryptInit`/`C_Decrypt`
-      for `CKM_AES_GCM`; rustssm only implements the encrypt direction.
+- [x] **AES-GCM decrypt** — `decrypt()` uses `C_DecryptInit`/`C_Decrypt`
+      for `CKM_AES_GCM` (auth-tag failure → `CKR_ENCRYPTED_DATA_INVALID`,
+      short ciphertext → `CKR_ENCRYPTED_DATA_LEN_RANGE`). Still 12-byte IV
+      only (next item).
 - [ ] **AES-GCM with 32-byte IVs** — nl-wallet passes
       `random_bytes(32)` as IV; rustssm currently requires exactly 12 bytes.
       Implement the GCM spec's GHASH-based IV processing for arbitrary IV

@@ -16,9 +16,11 @@ use crate::slot::SlotId;
 #[derive(Error, Debug)]
 pub enum SessionError {
     #[error("error storing object: {0}")]
-    ObjectStore(#[from] ObjectStoreError),
+    ObjectStore(#[source] ObjectStoreError),
+
     #[error("search already active")]
     SearchActive,
+
     #[error("search not active")]
     SearchNotActive,
 }
@@ -84,7 +86,10 @@ impl Session {
             _ => {}
         });
 
-        let object_id = self.objects.write(object, private, label)?;
+        let object_id = self
+            .objects
+            .write(object, private, label)
+            .map_err(SessionError::ObjectStore)?;
         Ok(object_id)
     }
 
@@ -92,7 +97,7 @@ impl Session {
     where
         T: DeserializeOwned,
     {
-        Ok(self.objects.read(object_id)?)
+        self.objects.read(object_id).map_err(SessionError::ObjectStore)
     }
 
     pub fn object_exists(&self, object_id: &ObjectId) -> bool {
@@ -100,7 +105,7 @@ impl Session {
     }
 
     pub fn delete_object(&self, object_id: &ObjectId) -> Result<(), SessionError> {
-        Ok(self.objects.delete(object_id)?)
+        self.objects.delete(object_id).map_err(SessionError::ObjectStore)
     }
 
     pub fn init_search(&self, attributes: Vec<Attribute>) -> Result<(), SessionError> {
@@ -134,7 +139,7 @@ impl Session {
                     _ => {}
                 });
 
-                *object_ids = self.objects.search(private, label)?;
+                *object_ids = self.objects.search(private, label).map_err(SessionError::ObjectStore)?;
                 *search_performed = true;
             }
 

@@ -30,6 +30,7 @@ use crate::session::Session;
 use crate::session::SessionError;
 use crate::session::SessionId;
 use crate::session::SessionState;
+use crate::signing::Decrypt;
 use crate::signing::Encrypt;
 use crate::signing::HmacSha256;
 use crate::signing::Sign;
@@ -53,62 +54,97 @@ pub const MAX_RSA_MODULUS_BITS: u64 = 8192;
 pub enum HsmError {
     #[error("not initialized")]
     NotInitialized,
+
     #[error("already initialized")]
     AlreadyInitialized,
+
     #[error("slot not found: {0:?}")]
     SlotNotFound(SlotId),
+
     #[error("session not found: {0:?}")]
     SessionNotFound(SessionId),
+
     #[error("open sessions exist on slot: {0:?}")]
     SessionExists(SlotId),
+
     #[error("session is read-only")]
     SessionReadOnly,
+
     #[error("a read-only session is open")]
     SessionReadOnlyExists,
+
     #[error("user already logged in")]
     UserAlreadyLoggedIn,
+
     #[error("another user already logged in")]
     UserAnotherAlreadyLoggedIn,
+
     #[error("user not logged in")]
     UserNotLoggedIn,
+
     #[error("user PIN not initialized")]
     UserPinNotInitialized,
+
     #[error("PIN incorrect")]
     PinIncorrect,
+
     #[error("operation active")]
     OperationActive,
+
     #[error("operation not initialized")]
     OperationNotInitialized,
+
     #[error("mechanism invalid for this operation")]
     MechanismInvalid,
+
     #[error("template incomplete")]
     TemplateIncomplete,
+
     #[error("attribute value invalid")]
     AttributeValueInvalid,
+
     #[error("attribute type invalid")]
     AttributeTypeInvalid,
+
     #[error("key handle invalid")]
     KeyHandleInvalid,
+
     #[error("key size out of range")]
     KeySizeRange,
+
     #[error("wrapping key handle invalid")]
     WrappingKeyHandleInvalid,
+
     #[error("wrapping key size out of range")]
     WrappingKeySizeRange,
+
     #[error("unwrapping key handle invalid")]
     UnwrappingKeyHandleInvalid,
+
     #[error("unwrapping key size out of range")]
     UnwrappingKeySizeRange,
+
     #[error("wrapped key invalid")]
     WrappedKeyInvalid,
+
     #[error("object handle invalid")]
     ObjectHandleInvalid,
+
     #[error("signature invalid")]
     SignatureInvalid,
+
     #[error("data length out of range")]
     DataLenRange,
+
+    #[error("encrypted data length out of range")]
+    EncryptedDataLenRange,
+
+    #[error("encrypted data invalid")]
+    EncryptedDataInvalid,
+
     #[error("object store unavailable: {0}")]
-    ObjectStore(#[from] ObjectStoreError),
+    ObjectStore(#[source] ObjectStoreError),
+
     #[error("internal error")]
     GeneralError,
 }
@@ -192,7 +228,10 @@ impl Hsm {
     }
 
     fn object_store(&self) -> Result<Arc<ObjectStore>> {
-        let store = self.object_store.get_or_try_init(|| ObjectStore::new().map(Arc::new))?;
+        let store = self
+            .object_store
+            .get_or_try_init(|| ObjectStore::new().map(Arc::new))
+            .map_err(HsmError::ObjectStore)?;
         Ok(store.clone())
     }
 
@@ -232,7 +271,7 @@ impl Hsm {
         }
 
         // (Re)initializing a token destroys all its objects and resets its PINs.
-        store.clear()?;
+        store.clear().map_err(HsmError::ObjectStore)?;
 
         slot.initialized = true;
         slot.so_pin = Some(so_pin);
@@ -559,7 +598,9 @@ impl Hsm {
         let session = session_lock.read().unwrap();
 
         session.delete_object(&object).map_err(|error| match error {
-            SessionError::ObjectStore(ObjectStoreError::Database(e)) => ObjectStoreError::Database(e).into(),
+            SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
+                HsmError::ObjectStore(ObjectStoreError::Database(e))
+            }
             _ => HsmError::ObjectHandleInvalid,
         })
     }
@@ -802,6 +843,67 @@ impl Hsm {
         operation.encrypt(data).ok_or(HsmError::GeneralError)
     }
 
+    pub fn decrypt_init(&self, session_id: SessionId, mechanism: &Mechanism, key: ObjectId) -> Result<()> {
+        let session_lock = self.get_session(session_id)?;
+        let session = session_lock.read().unwrap();
+
+        if session.operation.get().is_some() {
+            return Err(HsmError::OperationActive);
+        }
+
+        match mechanism {
+            Mechanism::AesGcm {
+                initialization_vector,
+                additional_authenticated_data,
+            } => {
+                let key_bytes: Vec<u8> = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                if !matches!(key_bytes.len(), 16 | 32) {
+                    return Err(HsmError::KeySizeRange);
+                }
+
+                session
+                    .operation
+                    .set(Operation::DecryptAesGcm {
+                        key: key_bytes,
+                        initialization_vector: initialization_vector.clone(),
+                        additional_authenticated_data: additional_authenticated_data.clone(),
+                    })
+                    .map_err(|_| HsmError::OperationActive)
+            }
+            _ => Err(HsmError::MechanismInvalid),
+        }
+    }
+
+    /// Upper bound on the plaintext length the active decrypt operation will
+    /// produce for `data_length` bytes of ciphertext. Does not consume the
+    /// operation. AES-GCM ciphertext carries a trailing tag, so anything
+    /// shorter than the tag cannot be valid.
+    pub fn decrypted_length(&self, session_id: SessionId, data_length: u64) -> Result<u64> {
+        let session_lock = self.get_session(session_id)?;
+        let session = session_lock.read().unwrap();
+
+        if !session.operation.get().is_some_and(Operation::is_decrypt) {
+            return Err(HsmError::OperationNotInitialized);
+        }
+
+        data_length
+            .checked_sub(AES_GCM_TAG_LENGTH as u64)
+            .ok_or(HsmError::EncryptedDataLenRange)
+    }
+
+    /// Decrypts `data`, consuming the active decrypt operation.
+    pub fn decrypt(&self, session_id: SessionId, data: &[u8]) -> Result<Vec<u8>> {
+        let session_lock = self.get_session(session_id)?;
+        let mut session = session_lock.write().unwrap();
+
+        if !session.operation.get().is_some_and(Operation::is_decrypt) {
+            return Err(HsmError::OperationNotInitialized);
+        }
+
+        let operation = session.operation.take().unwrap();
+        operation.decrypt(data).ok_or(HsmError::EncryptedDataInvalid)
+    }
+
     // ---- internals -----------------------------------------------------------
 
     fn check_writable(&self, session: &Session, attributes: &[Attribute]) -> Result<()> {
@@ -857,7 +959,9 @@ where
     T: DeserializeOwned,
 {
     session.read_object(object_id).map_err(|error| match error {
-        SessionError::ObjectStore(ObjectStoreError::Database(e)) => ObjectStoreError::Database(e).into(),
+        SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
+            HsmError::ObjectStore(ObjectStoreError::Database(e))
+        }
         _ => invalid,
     })
 }

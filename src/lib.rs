@@ -108,6 +108,8 @@ fn rv_from(error: HsmError) -> raw::CK_RV {
         HsmError::ObjectHandleInvalid => raw::CKR_OBJECT_HANDLE_INVALID,
         HsmError::SignatureInvalid => raw::CKR_SIGNATURE_INVALID,
         HsmError::DataLenRange => raw::CKR_DATA_LEN_RANGE,
+        HsmError::EncryptedDataLenRange => raw::CKR_ENCRYPTED_DATA_LEN_RANGE,
+        HsmError::EncryptedDataInvalid => raw::CKR_ENCRYPTED_DATA_INVALID,
         HsmError::ObjectStore(_) => raw::CKR_DEVICE_ERROR,
         HsmError::GeneralError => raw::CKR_GENERAL_ERROR,
     }
@@ -897,25 +899,66 @@ pub extern "C" fn C_EncryptFinal(
 }
 
 #[no_mangle]
-pub extern "C" fn C_DecryptInit(
-    _hSession: raw::CK_SESSION_HANDLE,
-    _pMechanism: raw::CK_MECHANISM_PTR,
-    _hKey: raw::CK_OBJECT_HANDLE,
+/// # Safety
+///
+/// Dereferencing
+pub unsafe extern "C" fn C_DecryptInit(
+    hSession: raw::CK_SESSION_HANDLE,
+    pMechanism: raw::CK_MECHANISM_PTR,
+    hKey: raw::CK_OBJECT_HANDLE,
 ) -> raw::CK_RV {
-    debug!("C_DecryptInit");
-    raw::CKR_FUNCTION_NOT_SUPPORTED
+    ck("C_DecryptInit", || {
+        debug!("C_DecryptInit");
+
+        let mechanism = unsafe { read_mechanism(pMechanism) }?;
+
+        HSM.decrypt_init(SessionId(hSession), &mechanism, hKey.into()).ck()
+    })
 }
 
 #[no_mangle]
-pub extern "C" fn C_Decrypt(
-    _hSession: raw::CK_SESSION_HANDLE,
-    _pEncryptedData: raw::CK_BYTE_PTR,
-    _ulEncryptedDataLen: raw::CK_ULONG,
-    _pData: raw::CK_BYTE_PTR,
-    _pulDataLen: raw::CK_ULONG_PTR,
+/// # Safety
+///
+/// Dereferencing
+pub unsafe extern "C" fn C_Decrypt(
+    hSession: raw::CK_SESSION_HANDLE,
+    pEncryptedData: raw::CK_BYTE_PTR,
+    ulEncryptedDataLen: raw::CK_ULONG,
+    pData: raw::CK_BYTE_PTR,
+    pulDataLen: raw::CK_ULONG_PTR,
 ) -> raw::CK_RV {
-    debug!("C_Decrypt");
-    raw::CKR_FUNCTION_NOT_SUPPORTED
+    ck("C_Decrypt", || {
+        debug!("C_Decrypt");
+
+        let session_id = SessionId(hSession);
+        let required = HSM.decrypted_length(session_id, ulEncryptedDataLen).ck()?;
+
+        if pEncryptedData.is_null() || pulDataLen.is_null() {
+            return Err(raw::CKR_ARGUMENTS_BAD);
+        }
+
+        unsafe {
+            // A null output buffer requests the length; a too-small buffer is
+            // reported without consuming the operation.
+            if pData.is_null() {
+                *pulDataLen = required;
+                return Ok(());
+            }
+
+            if *pulDataLen < required {
+                *pulDataLen = required;
+                return Err(raw::CKR_BUFFER_TOO_SMALL);
+            }
+
+            let ciphertext = slice::from_raw_parts(pEncryptedData, ulEncryptedDataLen as usize);
+            let plaintext = HSM.decrypt(session_id, ciphertext).ck()?;
+
+            ptr::copy_nonoverlapping(plaintext.as_ptr(), pData, plaintext.len());
+            *pulDataLen = plaintext.len() as raw::CK_ULONG;
+        }
+
+        Ok(())
+    })
 }
 
 #[no_mangle]

@@ -40,6 +40,10 @@ pub trait Encrypt {
     fn encrypt(self, data: &[u8]) -> Option<Vec<u8>>;
 }
 
+pub trait Decrypt {
+    fn decrypt(self, data: &[u8]) -> Option<Vec<u8>>;
+}
+
 impl Sign for Operation {
     fn sign(self, data: &[u8]) -> Signature {
         match self {
@@ -114,6 +118,33 @@ impl Encrypt for Operation {
                 match key.len() {
                     16 => Aes128Gcm::new_from_slice(&key).ok()?.encrypt(nonce, payload).ok(),
                     32 => Aes256Gcm::new_from_slice(&key).ok()?.encrypt(nonce, payload).ok(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Decrypt for Operation {
+    fn decrypt(self, data: &[u8]) -> Option<Vec<u8>> {
+        match self {
+            Operation::DecryptAesGcm {
+                key,
+                initialization_vector,
+                additional_authenticated_data,
+            } => {
+                let nonce = Nonce::from_slice(&initialization_vector);
+                let payload = Payload {
+                    msg: data,
+                    aad: &additional_authenticated_data,
+                };
+
+                // A failure here is an authentication-tag mismatch (or a
+                // ciphertext shorter than the tag), reported to the caller.
+                match key.len() {
+                    16 => Aes128Gcm::new_from_slice(&key).ok()?.decrypt(nonce, payload).ok(),
+                    32 => Aes256Gcm::new_from_slice(&key).ok()?.decrypt(nonce, payload).ok(),
                     _ => None,
                 }
             }

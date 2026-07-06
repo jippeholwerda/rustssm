@@ -29,6 +29,11 @@ pub enum Operation {
         initialization_vector: Vec<u8>,
         additional_authenticated_data: Vec<u8>,
     },
+    DecryptAesGcm {
+        key: Vec<u8>,
+        initialization_vector: Vec<u8>,
+        additional_authenticated_data: Vec<u8>,
+    },
 }
 
 impl Operation {
@@ -48,5 +53,9 @@ impl Operation {
 
     pub fn is_encrypt(&self) -> bool {
         matches!(self, Operation::EncryptAesGcm { .. })
+    }
+
+    pub fn is_decrypt(&self) -> bool {
+        matches!(self, Operation::DecryptAesGcm { .. })
     }
 }

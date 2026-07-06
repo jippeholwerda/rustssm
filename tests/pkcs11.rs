@@ -38,12 +38,24 @@ fn module_path() -> std::path::PathBuf {
     if dir.ends_with("deps") {
         dir.pop();
     }
+
+    // `cargo test` compiles the crate as a test harness but does not rebuild
+    // the standalone cdylib this test dlopens, so a plain `cargo test` would
+    // silently run against a stale (or missing) `.so`. Build it here for the
+    // matching profile; the outer cargo has released its build lock by the
+    // time tests execute, so this nested invocation is safe.
+    let mut cargo = std::process::Command::new(env!("CARGO"));
+    cargo.args(["build", "--lib"]).current_dir(env!("CARGO_MANIFEST_DIR"));
+
+    let release = dir.ends_with("release");
+    if release {
+        cargo.arg("--release");
+    }
+    let status = cargo.status().expect("run cargo build");
+    assert!(status.success(), "cargo build of the cdylib failed");
+
     let lib = dir.join("librustssm.so");
-    assert!(
-        lib.exists(),
-        "built module not found at {}; run `cargo build` first",
-        lib.display()
-    );
+    assert!(lib.exists(), "built module not found at {}", lib.display());
     lib
 }
 
@@ -97,6 +109,8 @@ fn pkcs11_end_to_end() {
     let c_verify = fl.C_Verify.unwrap();
     let c_encrypt_init = fl.C_EncryptInit.unwrap();
     let c_encrypt = fl.C_Encrypt.unwrap();
+    let c_decrypt_init = fl.C_DecryptInit.unwrap();
+    let c_decrypt = fl.C_Decrypt.unwrap();
 
     // --- calls before C_Initialize are rejected -------------------------
     let mut session: raw::CK_SESSION_HANDLE = 0;
@@ -394,8 +408,8 @@ fn pkcs11_end_to_end() {
         raw::CKR_OK
     );
 
-    // AES-GCM: exercises CK_GCM_PARAMS decoding and the encrypt buffer
-    // protocol. (Decryption is not yet supported, so we only encrypt.)
+    // AES-GCM: exercises CK_GCM_PARAMS decoding and the encrypt/decrypt
+    // buffer protocol.
     let mut iv = [0x42u8; 12];
     let aad = b"header";
     let gcm_params = raw::CK_GCM_PARAMS {
@@ -446,6 +460,54 @@ fn pkcs11_end_to_end() {
             )
         },
         raw::CKR_OK
+    );
+
+    // Decrypt the ciphertext back under the same key and GCM parameters.
+    assert_eq!(
+        unsafe { c_decrypt_init(session, &gcm as *const _ as *mut _, sym_key) },
+        raw::CKR_OK
+    );
+    let mut pt_len: raw::CK_ULONG = 0;
+    assert_eq!(
+        unsafe { c_decrypt(session, ciphertext.as_mut_ptr(), ct_len, ptr::null_mut(), &mut pt_len,) },
+        raw::CKR_OK
+    );
+    assert_eq!(pt_len, plaintext.len() as raw::CK_ULONG, "plaintext = ciphertext - tag");
+    let mut decrypted = vec![0u8; pt_len as usize];
+    assert_eq!(
+        unsafe {
+            c_decrypt(
+                session,
+                ciphertext.as_mut_ptr(),
+                ct_len,
+                decrypted.as_mut_ptr(),
+                &mut pt_len,
+            )
+        },
+        raw::CKR_OK
+    );
+    assert_eq!(&decrypted[..pt_len as usize], plaintext);
+
+    // A tampered tag must fail authentication.
+    assert_eq!(
+        unsafe { c_decrypt_init(session, &gcm as *const _ as *mut _, sym_key) },
+        raw::CKR_OK
+    );
+    let mut tampered = ciphertext.clone();
+    tampered[0] ^= 0xFF;
+    let mut junk = vec![0u8; pt_len as usize];
+    let mut junk_len: raw::CK_ULONG = junk.len() as raw::CK_ULONG;
+    assert_eq!(
+        unsafe {
+            c_decrypt(
+                session,
+                tampered.as_mut_ptr(),
+                tampered.len() as raw::CK_ULONG,
+                junk.as_mut_ptr(),
+                &mut junk_len,
+            )
+        },
+        raw::CKR_ENCRYPTED_DATA_INVALID
     );
 
     // --- error mapping: unsupported mechanism, invalid session ----------
