@@ -11,7 +11,6 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::raw;
 use crate::raw::CK_OBJECT_HANDLE;
 use crate::util::random_string;
 
@@ -42,13 +41,34 @@ impl From<ObjectId> for u64 {
     }
 }
 
-impl From<raw::CK_OBJECT_HANDLE> for ObjectId {
+impl From<CK_OBJECT_HANDLE> for ObjectId {
     fn from(value: CK_OBJECT_HANDLE) -> Self {
         ObjectId::new(value)
     }
 }
 
-const SCHEMA: &str = include_str!("../db/migrations/20240107000001_object.sql");
+const OBJECT_SCHEMA: &str = include_str!("../db/migrations/20240107000001_object.sql");
+const TOKEN_SCHEMA: &str = include_str!("../db/migrations/20260706000001_token.sql");
+
+fn apply_schema(connection: &Connection) -> Result<(), ObjectStoreError> {
+    connection
+        .execute_batch(OBJECT_SCHEMA)
+        .map_err(ObjectStoreError::Database)?;
+    connection
+        .execute_batch(TOKEN_SCHEMA)
+        .map_err(ObjectStoreError::Database)?;
+    Ok(())
+}
+
+/// Persisted per-slot token state. A row exists exactly when the token is
+/// initialized; PINs are stored as salted hashes (see [`crate::pin::PinHash`]).
+#[derive(Debug, Clone)]
+pub struct TokenRecord {
+    pub slot_id: u64,
+    pub label: Option<String>,
+    pub so_pin_hash: String,
+    pub user_pin_hash: Option<String>,
+}
 
 pub struct ObjectStore {
     connection: Mutex<Connection>,
@@ -78,7 +98,7 @@ impl ObjectStore {
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(ObjectStoreError::Database)?;
-        connection.execute_batch(SCHEMA).map_err(ObjectStoreError::Database)?;
+        apply_schema(&connection)?;
 
         Ok(Self {
             connection: Mutex::new(connection),
@@ -88,7 +108,22 @@ impl ObjectStore {
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, ObjectStoreError> {
         let connection = Connection::open_in_memory().map_err(ObjectStoreError::Database)?;
-        connection.execute_batch(SCHEMA).map_err(ObjectStoreError::Database)?;
+        apply_schema(&connection)?;
+
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
+    }
+
+    /// Opens (creating if needed) a file-backed store at `path`. Used by tests
+    /// that need state to survive across `ObjectStore` instances.
+    #[cfg(test)]
+    pub fn at_path(path: &std::path::Path) -> Result<Self, ObjectStoreError> {
+        let connection = Connection::open(path).map_err(ObjectStoreError::Database)?;
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(ObjectStoreError::Database)?;
+        apply_schema(&connection)?;
 
         Ok(Self {
             connection: Mutex::new(connection),
@@ -188,6 +223,66 @@ impl ObjectStore {
             .map_err(ObjectStoreError::Database)?;
 
         Ok(ids.into_iter().map(|id| ObjectId(id as u64)).collect())
+    }
+
+    // ---- token state -------------------------------------------------------
+
+    /// Reads the persisted token state for every initialized slot.
+    pub fn load_tokens(&self) -> Result<Vec<TokenRecord>, ObjectStoreError> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection
+            .prepare("select slot_id, label, so_pin_hash, user_pin_hash from token")
+            .map_err(ObjectStoreError::Database)?;
+        let records = statement
+            .query_map([], |row| {
+                Ok(TokenRecord {
+                    slot_id: row.get::<_, i64>(0)? as u64,
+                    label: row.get(1)?,
+                    so_pin_hash: row.get(2)?,
+                    user_pin_hash: row.get(3)?,
+                })
+            })
+            .map_err(ObjectStoreError::Database)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ObjectStoreError::Database)?;
+
+        Ok(records)
+    }
+
+    /// (Re)initializes a token's persisted state, replacing any existing row
+    /// and clearing the user PIN.
+    pub fn save_token(&self, slot_id: u64, label: Option<&str>, so_pin_hash: &str) -> Result<(), ObjectStoreError> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .execute(
+                "insert into token (slot_id, label, so_pin_hash, user_pin_hash) values (?1, ?2, ?3, null) on \
+                 conflict(slot_id) do update set label = ?2, so_pin_hash = ?3, user_pin_hash = null",
+                params![slot_id as i64, label, so_pin_hash],
+            )
+            .map_err(ObjectStoreError::Database)?;
+        Ok(())
+    }
+
+    pub fn set_so_pin_hash(&self, slot_id: u64, so_pin_hash: &str) -> Result<(), ObjectStoreError> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .execute(
+                "update token set so_pin_hash = ?2 where slot_id = ?1",
+                params![slot_id as i64, so_pin_hash],
+            )
+            .map_err(ObjectStoreError::Database)?;
+        Ok(())
+    }
+
+    pub fn set_user_pin_hash(&self, slot_id: u64, user_pin_hash: &str) -> Result<(), ObjectStoreError> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .execute(
+                "update token set user_pin_hash = ?2 where slot_id = ?1",
+                params![slot_id as i64, user_pin_hash],
+            )
+            .map_err(ObjectStoreError::Database)?;
+        Ok(())
     }
 }
 

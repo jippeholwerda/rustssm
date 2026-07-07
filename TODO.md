@@ -1,9 +1,11 @@
 # TODO
 
-Current baseline (2026-07-02): rust-cryptoki `basic.rs` suite scores
-**31 passed / 45 failed / 2 ignored** against rustssm (with
+Current baseline (2026-07-06): rust-cryptoki `basic.rs` suite scores
+**33 passed / 43 failed / 2 ignored** against rustssm (with
 `TEST_PRETEND_LIBRARY=softhsm`). All failures are missing functionality, not
-bugs; each item below names the tests it unlocks.
+bugs; each item below names the tests it unlocks. (`CKM_AES_KEY_GEN` unlocked
+`session_find_objects` and `session_objecthandle_iterator` since the
+2026-07-02 baseline of 31/45.)
 
 ## 1. Make every rust-cryptoki test pass
 
@@ -141,11 +143,13 @@ TODOs, roughly in dependency order:
       dispatches on `(key_len, iv_len)` to a concrete `AesGcm<Aes*, U32>` via
       a generic `gcm_encrypt`/`gcm_decrypt` helper (nonce size is a
       compile-time type parameter, so each IV length needs its own type).
-- [ ] **Persistent token state** — PINs, label, and the initialized flag
-      live only in memory; objects alone are persisted in SQLite. nl-wallet
-      assumes a pre-initialized token it can log into at startup
-      (`hsm.toml`: `user_pin`), so token state must survive process
-      restarts. Includes storing PIN hashes rather than plaintext.
+- [x] **Persistent token state** — per-slot label, initialized flag and PIN
+      hashes now persist in a `token` table alongside the objects. `initialize`
+      hydrates the in-memory slots from the store, so a restarted process sees
+      the same tokens and accepts the same PINs. PINs are stored as salted
+      SHA-256 (`PinHash`), never plaintext. (A stolen DB already exposes the
+      keys, so this is hygiene, not a slow-KDF defence; layer Argon2 if that
+      changes.)
 - [ ] **Token-init tooling** — an equivalent of `softhsm2-util
       --init-token` so an operator can initialize the token and set the user
       PIN outside the wallet process.

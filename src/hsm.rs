@@ -24,8 +24,10 @@ use crate::mechanism::Mechanism;
 use crate::object_store::ObjectId;
 use crate::object_store::ObjectStore;
 use crate::object_store::ObjectStoreError;
+use crate::object_store::TokenRecord;
 use crate::operation::Operation;
 use crate::pin::Pin;
+use crate::pin::PinHash;
 use crate::session::Session;
 use crate::session::SessionError;
 use crate::session::SessionId;
@@ -203,6 +205,42 @@ impl Hsm {
         if self.initialized.swap(true, Ordering::SeqCst) {
             return Err(HsmError::AlreadyInitialized);
         }
+        // Load persisted token state so a restarted process sees the same
+        // tokens (and accepts the same PINs). Roll back on failure so the
+        // caller can retry once the store is reachable.
+        if let Err(error) = self.hydrate_slots() {
+            self.initialized.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Replaces each slot's persistent fields (initialized flag, label, PIN
+    /// hashes) with what the store holds. Runtime state (login, sessions) is
+    /// left untouched.
+    fn hydrate_slots(&self) -> Result<()> {
+        let store = self.object_store()?;
+        let tokens = store.load_tokens().map_err(HsmError::ObjectStore)?;
+        let by_slot: HashMap<u64, TokenRecord> = tokens.into_iter().map(|token| (token.slot_id, token)).collect();
+
+        let slots = self.slots.read().unwrap();
+        for (slot_id, slot_lock) in slots.iter() {
+            let mut slot = slot_lock.write().unwrap();
+            match by_slot.get(&slot_id.0) {
+                Some(record) => {
+                    slot.initialized = true;
+                    slot.label = record.label.clone();
+                    slot.so_pin = Some(PinHash::from_stored(record.so_pin_hash.clone()));
+                    slot.user_pin = record.user_pin_hash.clone().map(PinHash::from_stored);
+                }
+                None => {
+                    slot.initialized = false;
+                    slot.label = None;
+                    slot.so_pin = None;
+                    slot.user_pin = None;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -279,8 +317,13 @@ impl Hsm {
         // (Re)initializing a token destroys all its objects and resets its PINs.
         store.clear().map_err(HsmError::ObjectStore)?;
 
+        let so_pin_hash = PinHash::from_pin(&so_pin);
+        store
+            .save_token(slot_id.0, label.as_deref(), so_pin_hash.as_str())
+            .map_err(HsmError::ObjectStore)?;
+
         slot.initialized = true;
-        slot.so_pin = Some(so_pin);
+        slot.so_pin = Some(so_pin_hash);
         slot.user_pin = None;
         slot.current_user_type = None;
         slot.label = label;
@@ -363,16 +406,16 @@ impl Hsm {
                     return Err(HsmError::SessionReadOnlyExists);
                 }
 
-                if slot.so_pin.as_ref() != Some(&pin) {
+                if !slot.so_pin.as_ref().is_some_and(|hash| hash.verify(&pin)) {
                     return Err(HsmError::PinIncorrect);
                 }
             }
             UserType::User => {
-                if slot.user_pin.is_none() {
+                let Some(hash) = slot.user_pin.as_ref() else {
                     return Err(HsmError::UserPinNotInitialized);
-                }
+                };
 
-                if slot.user_pin.as_ref() != Some(&pin) {
+                if !hash.verify(&pin) {
                     return Err(HsmError::PinIncorrect);
                 }
             }
@@ -396,6 +439,7 @@ impl Hsm {
 
     /// Sets the user PIN. Requires an SO login in a read/write session.
     pub fn init_pin(&self, session_id: SessionId, pin: Pin) -> Result<()> {
+        let store = self.object_store()?;
         let (session_lock, slot_lock) = self.get_session_and_slot(session_id)?;
         let session = session_lock.read().unwrap();
         let mut slot = slot_lock.write().unwrap();
@@ -404,15 +448,21 @@ impl Hsm {
             return Err(HsmError::UserNotLoggedIn);
         }
 
-        slot.user_pin = Some(pin);
+        let user_pin_hash = PinHash::from_pin(&pin);
+        store
+            .set_user_pin_hash(session.slot_id.0, user_pin_hash.as_str())
+            .map_err(HsmError::ObjectStore)?;
+        slot.user_pin = Some(user_pin_hash);
         Ok(())
     }
 
     /// Changes the PIN of the currently logged-in user, or the user PIN when
     /// no one is logged in.
     pub fn set_pin(&self, session_id: SessionId, old_pin: Pin, new_pin: Pin) -> Result<()> {
+        let store = self.object_store()?;
         let (session_lock, slot_lock) = self.get_session_and_slot(session_id)?;
         let session = session_lock.read().unwrap();
+        let slot_id = session.slot_id;
         let mut slot = slot_lock.write().unwrap();
 
         if !matches!(session.state, SessionState::ReadWrite) {
@@ -420,15 +470,23 @@ impl Hsm {
         }
 
         if slot.current_user_type == Some(UserType::So) {
-            if slot.so_pin.as_ref() != Some(&old_pin) {
+            if !slot.so_pin.as_ref().is_some_and(|hash| hash.verify(&old_pin)) {
                 return Err(HsmError::PinIncorrect);
             }
-            slot.so_pin = Some(new_pin);
+            let so_pin_hash = PinHash::from_pin(&new_pin);
+            store
+                .set_so_pin_hash(slot_id.0, so_pin_hash.as_str())
+                .map_err(HsmError::ObjectStore)?;
+            slot.so_pin = Some(so_pin_hash);
         } else {
-            if slot.user_pin.as_ref() != Some(&old_pin) {
+            if !slot.user_pin.as_ref().is_some_and(|hash| hash.verify(&old_pin)) {
                 return Err(HsmError::PinIncorrect);
             }
-            slot.user_pin = Some(new_pin);
+            let user_pin_hash = PinHash::from_pin(&new_pin);
+            store
+                .set_user_pin_hash(slot_id.0, user_pin_hash.as_str())
+                .map_err(HsmError::ObjectStore)?;
+            slot.user_pin = Some(user_pin_hash);
         }
 
         Ok(())

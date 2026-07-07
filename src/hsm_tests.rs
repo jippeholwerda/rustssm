@@ -154,6 +154,57 @@ fn init_token_destroys_objects_and_resets_user_pin() {
     assert!(!hsm.object_exists(session, key).unwrap());
 }
 
+#[test]
+fn token_state_survives_a_restart() {
+    let path = std::env::temp_dir().join(format!("rustssm-persist-{}.db", std::process::id()));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+
+    // First boot: initialize the token and set the user PIN, then drop the
+    // HSM (closing its database connection).
+    {
+        let hsm = Hsm::with_store(ObjectStore::at_path(&path).unwrap());
+        hsm.initialize().unwrap();
+        hsm.init_token(&SLOT, Pin::new(SO_PIN), Some(String::from("persisted")))
+            .unwrap();
+
+        let session = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+        hsm.login(session, UserType::So, Pin::new(SO_PIN)).unwrap();
+        hsm.init_pin(session, Pin::new(USER_PIN)).unwrap();
+    }
+
+    // Second boot: a fresh HSM over the same database file must see the token
+    // and accept the same PINs.
+    {
+        let hsm = Hsm::with_store(ObjectStore::at_path(&path).unwrap());
+        hsm.initialize().unwrap();
+
+        let status = hsm.token_status(SLOT).unwrap();
+        assert!(status.initialized);
+        assert!(status.user_pin_set);
+        assert_eq!(status.label.as_deref(), Some("persisted"));
+
+        let session = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+        hsm.login(session, UserType::User, Pin::new(USER_PIN)).unwrap();
+        hsm.logout(session).unwrap();
+        assert!(matches!(
+            hsm.login(session, UserType::User, Pin::new("wrong")),
+            Err(HsmError::PinIncorrect)
+        ));
+
+        // PINs are persisted as hashes, never as plaintext.
+        let tokens = hsm.object_store().unwrap().load_tokens().unwrap();
+        let record = tokens.iter().find(|token| token.slot_id == SLOT.0).unwrap();
+        assert_ne!(record.so_pin_hash, SO_PIN);
+        assert_ne!(record.user_pin_hash.as_deref(), Some(USER_PIN));
+    }
+
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
 // ---- sessions ------------------------------------------------------------
 
 #[test]

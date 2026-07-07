@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use crate::pin::Pin;
+use crate::pin::PinHash;
 use crate::session::Session;
 use crate::session::SessionId;
 use crate::session::SessionState;
@@ -19,8 +19,8 @@ pub enum UserType {
 pub struct Slot {
     pub label: Option<String>,
     pub initialized: bool,
-    pub so_pin: Option<Pin>,
-    pub user_pin: Option<Pin>,
+    pub so_pin: Option<PinHash>,
+    pub user_pin: Option<PinHash>,
     pub current_user_type: Option<UserType>,
     pub sessions: RwLock<HashMap<SessionId, Arc<RwLock<Session>>>>,
 }
