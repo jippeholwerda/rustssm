@@ -13,6 +13,7 @@ use elliptic_curve::Generate;
 use hmac::KeyInit;
 use p256::ecdsa;
 use p256::ecdsa::VerifyingKey;
+use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
 use rsa::RsaPublicKey;
 use serde::de::DeserializeOwned;
@@ -20,6 +21,7 @@ use thiserror::Error;
 
 use crate::attribute::Attribute;
 use crate::attribute::AttributeType;
+use crate::attribute::KeyType;
 use crate::attribute::ObjectClass;
 use crate::mechanism::Mechanism;
 use crate::object_store::ObjectId;
@@ -498,10 +500,12 @@ impl Hsm {
 
     // ---- key management ----------------------------------------------------
 
-    /// Creates an object from a template. Only secret keys (`CKO_SECRET_KEY`
-    /// with `CKA_VALUE`) are supported; the value bytes are stored like a
-    /// generated or imported symmetric key. Other classes are rejected as
-    /// inconsistent.
+    /// Creates an object from a template. Secret keys (`CKO_SECRET_KEY` with
+    /// `CKA_VALUE`) are stored like a generated or imported symmetric key.
+    /// Public keys (`CKO_PUBLIC_KEY`) are stored as metadata-only objects so
+    /// their attributes can be read back and searched. Other classes are rejected
+    /// as inconsistent. In every case the template attributes are persisted verbatim
+    /// (minus `CKA_VALUE`, which becomes the key material) for later readback.
     pub fn create_object(&self, session_id: SessionId, attributes: Vec<Attribute>) -> Result<ObjectId> {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
@@ -527,20 +531,27 @@ impl Hsm {
                     return Err(HsmError::AttributeValueInvalid);
                 }
 
+                let attributes = merge_attributes(attributes, vec![]);
                 session.write_object(&value, attributes).map_err(store_error)
             }
-            Some(ObjectClass::Unknown) => Err(HsmError::TemplateInconsistent),
+            Some(ObjectClass::PublicKey) => {
+                let attributes = merge_attributes(attributes, vec![]);
+                let material: Vec<u8> = Vec::new();
+                session.write_object(&material, attributes).map_err(store_error)
+            }
+            Some(ObjectClass::PrivateKey) | Some(ObjectClass::Unknown) => Err(HsmError::TemplateInconsistent),
             None => Err(HsmError::TemplateIncomplete),
         }
     }
 
     /// Imports raw key material as a labelled token secret key, the same way
-    /// a generated symmetric key is stored. Used by the provisioning tooling.
+    /// a generated symmetric key is stored.
     pub fn import_secret_key(&self, session_id: SessionId, key: Vec<u8>, label: String) -> Result<ObjectId> {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
         let attributes = vec![
+            Attribute::Class(ObjectClass::SecretKey),
             Attribute::Label(label),
             Attribute::Private(true),
             Attribute::Token(true),
@@ -561,13 +572,13 @@ impl Hsm {
 
         self.check_writable(&session, &attributes)?;
 
-        let key_len = match mechanism {
+        let (key_len, key_type) = match mechanism {
             Mechanism::GenericSecretKeyGen => {
                 let key_len = value_len(&attributes)?;
                 if key_len == 0 || key_len > MAX_SECRET_KEY_LENGTH {
                     return Err(HsmError::AttributeValueInvalid);
                 }
-                key_len
+                (key_len, KeyType::GenericSecret)
             }
             Mechanism::AesKeyGen => {
                 // CKM_AES_KEY_GEN takes the key length from CKA_VALUE_LEN;
@@ -576,12 +587,16 @@ impl Hsm {
                 if !matches!(key_len, 16 | 24 | 32) {
                     return Err(HsmError::AttributeValueInvalid);
                 }
-                key_len
+                (key_len, KeyType::Aes)
             }
             _ => return Err(HsmError::MechanismInvalid),
         };
 
         let key = random_bytes(key_len as usize);
+        let attributes = merge_attributes(
+            attributes,
+            vec![Attribute::Class(ObjectClass::SecretKey), Attribute::KeyType(key_type)],
+        );
         let object_id = session.write_object(&key, attributes).map_err(store_error)?;
         Ok(object_id)
     }
@@ -622,6 +637,24 @@ impl Hsm {
                     RsaPrivateKey::new(&mut rng, bits as usize).map_err(|_| HsmError::AttributeValueInvalid)?;
                 let public_key = private_key.to_public_key();
 
+                let public_key_attributes = merge_attributes(
+                    public_key_attributes,
+                    vec![
+                        Attribute::Class(ObjectClass::PublicKey),
+                        Attribute::KeyType(KeyType::Rsa),
+                        Attribute::Modulus(public_key.n_bytes().to_vec()),
+                        Attribute::PublicExponent(public_key.e_bytes().to_vec()),
+                        Attribute::ModulusBits(public_key.n().bits() as u64),
+                    ],
+                );
+                let private_key_attributes = merge_attributes(
+                    private_key_attributes,
+                    vec![
+                        Attribute::Class(ObjectClass::PrivateKey),
+                        Attribute::KeyType(KeyType::Rsa),
+                    ],
+                );
+
                 let session = session_lock.read().unwrap();
                 let private_id = session
                     .write_object(&private_key, private_key_attributes)
@@ -636,6 +669,23 @@ impl Hsm {
                 let signing_key = ecdsa::SigningKey::generate();
                 let private_bytes = signing_key.to_bytes().to_vec();
                 let verifying_key = *signing_key.verifying_key();
+
+                let public_key_attributes = merge_attributes(
+                    public_key_attributes,
+                    vec![
+                        Attribute::Class(ObjectClass::PublicKey),
+                        Attribute::KeyType(KeyType::Ec),
+                        Attribute::EcPoint(ec_point_der(&verifying_key)?),
+                        Attribute::EcParams(SECP256R1_EC_PARAMS.to_vec()),
+                    ],
+                );
+                let private_key_attributes = merge_attributes(
+                    private_key_attributes,
+                    vec![
+                        Attribute::Class(ObjectClass::PrivateKey),
+                        Attribute::KeyType(KeyType::Ec),
+                    ],
+                );
 
                 let session = session_lock.read().unwrap();
                 let private_id = session
@@ -735,29 +785,29 @@ impl Hsm {
         Ok(session.object_exists(&object))
     }
 
-    /// Returns the value of a single attribute of an object.
-    ///
-    /// Only the EC point of P-256 public keys is available; objects do not
-    /// store their attributes yet.
-    pub fn attribute_value(
+    /// Returns the requested attribute of an object, or `None` if the object
+    /// does not carry it. Attributes are served from the object's stored
+    /// typed attribute list, which was assembled at creation from the
+    /// template plus token-synthesized and derived values.
+    pub fn object_attribute(
         &self,
         session_id: SessionId,
         object: ObjectId,
         attribute_type: AttributeType,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Option<Attribute>> {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
-        match attribute_type {
-            AttributeType::EcPoint => {
-                let verifying_key: VerifyingKey = read_handle(&session, &object, HsmError::AttributeTypeInvalid)?;
-
-                OctetString::new(verifying_key.to_sec1_bytes().to_vec())
-                    .ok()
-                    .and_then(|octets| octets.to_der().ok())
-                    .ok_or(HsmError::GeneralError)
+        let attributes = session.read_object_attributes(&object).map_err(|error| match error {
+            SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
+                HsmError::ObjectStore(ObjectStoreError::Database(e))
             }
-        }
+            _ => HsmError::ObjectHandleInvalid,
+        })?;
+
+        Ok(attributes
+            .into_iter()
+            .find(|attr| attr.attribute_type() == Some(attribute_type)))
     }
 
     pub fn find_objects_init(&self, session_id: SessionId, attributes: Vec<Attribute>) -> Result<()> {
@@ -1107,6 +1157,41 @@ fn store_error(error: SessionError) -> HsmError {
         SessionError::ObjectStore(e) => HsmError::ObjectStore(e),
         _ => HsmError::GeneralError,
     }
+}
+
+/// DER encoding of the `prime256v1` (P-256) named curve OID, the value of
+/// `CKA_EC_PARAMS` for every EC key this token produces.
+const SECP256R1_EC_PARAMS: [u8; 10] = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+
+/// Merges token-synthesized/derived attributes into an application template,
+/// producing the attribute list persisted with the object. `CKA_VALUE` (the
+/// key material) and unrecognized attributes are dropped, and each derived
+/// attribute is added only when the template does not already carry that type
+/// so the application's choice wins.
+fn merge_attributes(mut attributes: Vec<Attribute>, derived: Vec<Attribute>) -> Vec<Attribute> {
+    attributes.retain(|attr| !matches!(attr, Attribute::Value(_) | Attribute::Unknown));
+
+    for attribute in derived {
+        let already_present = attribute.attribute_type().is_some_and(|type_| {
+            attributes
+                .iter()
+                .any(|existing| existing.attribute_type() == Some(type_))
+        });
+        if !already_present {
+            attributes.push(attribute);
+        }
+    }
+
+    attributes
+}
+
+/// The `CKA_EC_POINT` value of a P-256 public key: its uncompressed SEC1
+/// encoding wrapped in a DER `OCTET STRING`.
+fn ec_point_der(verifying_key: &VerifyingKey) -> Result<Vec<u8>> {
+    OctetString::new(verifying_key.to_sec1_bytes().to_vec())
+        .ok()
+        .and_then(|octets| octets.to_der().ok())
+        .ok_or(HsmError::GeneralError)
 }
 
 #[cfg(test)]

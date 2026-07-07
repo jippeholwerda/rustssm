@@ -3,14 +3,14 @@ use std::time::Duration;
 
 use log::info;
 use rusqlite::params;
-use rusqlite::params_from_iter;
-use rusqlite::types::Value;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::attribute::Attribute;
 use crate::raw::CK_OBJECT_HANDLE;
 use crate::util::random_string;
 
@@ -58,6 +58,15 @@ fn apply_schema(connection: &Connection) -> Result<(), ObjectStoreError> {
         .execute_batch(TOKEN_SCHEMA)
         .map_err(ObjectStoreError::Database)?;
     Ok(())
+}
+
+/// The persisted form of an object: its full typed attribute list (the
+/// creation template merged with token-synthesized and derived attributes)
+/// together with the serialized key material used by crypto operations.
+#[derive(Debug, Serialize, Deserialize)]
+struct ObjectRecord {
+    attributes: Vec<Attribute>,
+    material: Vec<u8>,
 }
 
 /// Persisted per-slot token state. A row exists exactly when the token is
@@ -130,19 +139,27 @@ impl ObjectStore {
         })
     }
 
-    pub fn write<T>(
-        &self,
-        object: &T,
-        private: Option<bool>,
-        label: Option<String>,
-    ) -> Result<ObjectId, ObjectStoreError>
+    /// Persists key `material` under its full typed attribute list. The
+    /// `private` and `label` columns are derived from the attributes purely
+    /// for legacy indexing; matching is done against the stored attribute
+    /// list (see [`ObjectStore::search`]).
+    pub fn write<T>(&self, attributes: Vec<Attribute>, material: &T) -> Result<ObjectId, ObjectStoreError>
     where
         T: Serialize + ?Sized,
     {
-        let content = postcard::to_allocvec(&object).map_err(ObjectStoreError::Serialize)?;
+        let material = postcard::to_allocvec(&material).map_err(ObjectStoreError::Serialize)?;
 
-        let private = i64::from(private.unwrap_or(false));
-        let label = label.unwrap_or_else(|| random_string(16));
+        let private = i64::from(attributes.iter().any(|attr| matches!(attr, Attribute::Private(true))));
+        let label = attributes
+            .iter()
+            .find_map(|attr| match attr {
+                Attribute::Label(label) => Some(label.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| random_string(16));
+
+        let record = ObjectRecord { attributes, material };
+        let content = postcard::to_allocvec(&record).map_err(ObjectStoreError::Serialize)?;
 
         let connection = self.connection.lock().unwrap();
         connection
@@ -159,9 +176,19 @@ impl ObjectStore {
     where
         T: DeserializeOwned,
     {
-        let content = self.read_raw(object_id)?;
-        let object = postcard::from_bytes(&content).map_err(ObjectStoreError::Serialize)?;
+        let record = self.read_record(object_id)?;
+        let object = postcard::from_bytes(&record.material).map_err(ObjectStoreError::Serialize)?;
         Ok(object)
+    }
+
+    /// Returns the stored typed attribute list of an object.
+    pub fn read_attributes(&self, object_id: &ObjectId) -> Result<Vec<Attribute>, ObjectStoreError> {
+        Ok(self.read_record(object_id)?.attributes)
+    }
+
+    fn read_record(&self, object_id: &ObjectId) -> Result<ObjectRecord, ObjectStoreError> {
+        let content = self.read_raw(object_id)?;
+        postcard::from_bytes(&content).map_err(ObjectStoreError::Serialize)
     }
 
     pub fn read_raw(&self, object_id: &ObjectId) -> Result<Vec<u8>, ObjectStoreError> {
@@ -201,28 +228,32 @@ impl ObjectStore {
         Ok(())
     }
 
-    pub fn search(&self, private: Option<bool>, label: Option<String>) -> Result<Vec<ObjectId>, ObjectStoreError> {
-        let mut sql = String::from("select id from object where 1 = 1");
-        let mut values: Vec<Value> = Vec::new();
-
-        if let Some(private) = private {
-            sql.push_str(" and private = ?");
-            values.push(i64::from(private).into());
-        }
-        if let Some(label) = label {
-            sql.push_str(" and label = ?");
-            values.push(label.into());
-        }
-
+    /// Returns the ids of all objects whose stored attributes are a superset
+    /// of `template`: every requested attribute must be present with an equal
+    /// value. An empty template matches every object.
+    pub fn search(&self, template: &[Attribute]) -> Result<Vec<ObjectId>, ObjectStoreError> {
         let connection = self.connection.lock().unwrap();
-        let mut statement = connection.prepare(&sql).map_err(ObjectStoreError::Database)?;
-        let ids = statement
-            .query_map(params_from_iter(values), |row| row.get::<_, i64>(0))
-            .map_err(ObjectStoreError::Database)?
-            .collect::<Result<Vec<_>, _>>()
+        let mut statement = connection
+            .prepare("select id, content from object")
+            .map_err(ObjectStoreError::Database)?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)))
             .map_err(ObjectStoreError::Database)?;
 
-        Ok(ids.into_iter().map(|id| ObjectId(id as u64)).collect())
+        let mut ids = Vec::new();
+        for row in rows {
+            let (id, content) = row.map_err(ObjectStoreError::Database)?;
+            let record: ObjectRecord = postcard::from_bytes(&content).map_err(ObjectStoreError::Serialize)?;
+
+            let matches = template
+                .iter()
+                .all(|wanted| record.attributes.iter().any(|have| have == wanted));
+            if matches {
+                ids.push(ObjectId(id as u64));
+            }
+        }
+
+        Ok(ids)
     }
 
     // ---- token state -------------------------------------------------------
@@ -291,6 +322,7 @@ mod tests {
     use elliptic_curve::Generate;
     use p256::ecdsa;
 
+    use crate::attribute::Attribute;
     use crate::object_store::ObjectStore;
 
     #[test]
@@ -300,7 +332,12 @@ mod tests {
         let key = ecdsa::SigningKey::generate();
         let bytes = key.to_bytes().to_vec();
 
-        let id = store.write(&bytes, Some(true), Some(String::from("test1"))).unwrap();
+        let id = store
+            .write(
+                vec![Attribute::Private(true), Attribute::Label(String::from("test1"))],
+                &bytes,
+            )
+            .unwrap();
 
         let stored_bytes: Vec<u8> = store.read(&id).unwrap();
         let stored_key = ecdsa::SigningKey::from_slice(&stored_bytes).unwrap();
@@ -309,5 +346,43 @@ mod tests {
 
         store.delete(&id).unwrap();
         assert!(store.read_raw(&id).is_err());
+    }
+
+    #[test]
+    fn search_matches_attribute_superset() {
+        let store = ObjectStore::in_memory().unwrap();
+
+        let bytes = vec![0u8; 32];
+        let a = store
+            .write(
+                vec![
+                    Attribute::Label(String::from("a")),
+                    Attribute::Id(b"shared".to_vec()),
+                ],
+                &bytes,
+            )
+            .unwrap();
+        let b = store
+            .write(
+                vec![
+                    Attribute::Label(String::from("b")),
+                    Attribute::Id(b"shared".to_vec()),
+                ],
+                &bytes,
+            )
+            .unwrap();
+
+        // Both share the id; only one has label "a".
+        assert_eq!(store.search(&[Attribute::Id(b"shared".to_vec())]).unwrap().len(), 2);
+        assert_eq!(
+            store.search(&[Attribute::Label(String::from("a"))]).unwrap(),
+            vec![a]
+        );
+        // An unmatched attribute value excludes everything.
+        assert!(store.search(&[Attribute::Id(b"other".to_vec())]).unwrap().is_empty());
+        // An empty template matches all.
+        assert_eq!(store.search(&[]).unwrap().len(), 2);
+
+        let _ = b;
     }
 }

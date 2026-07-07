@@ -73,24 +73,9 @@ impl Session {
     where
         T: Serialize + ?Sized,
     {
-        let mut private = None;
-        let mut label = None;
-
-        attributes.into_iter().for_each(|attr| match attr {
-            Attribute::Private(v) => {
-                private = Some(v);
-            }
-            Attribute::Label(v) => {
-                label = Some(v);
-            }
-            _ => {}
-        });
-
-        let object_id = self
-            .objects
-            .write(object, private, label)
-            .map_err(SessionError::ObjectStore)?;
-        Ok(object_id)
+        self.objects
+            .write(attributes, object)
+            .map_err(SessionError::ObjectStore)
     }
 
     pub fn read_object<T>(&self, object_id: &ObjectId) -> Result<T, SessionError>
@@ -98,6 +83,12 @@ impl Session {
         T: DeserializeOwned,
     {
         self.objects.read(object_id).map_err(SessionError::ObjectStore)
+    }
+
+    pub fn read_object_attributes(&self, object_id: &ObjectId) -> Result<Vec<Attribute>, SessionError> {
+        self.objects
+            .read_attributes(object_id)
+            .map_err(SessionError::ObjectStore)
     }
 
     pub fn object_exists(&self, object_id: &ObjectId) -> bool {
@@ -126,20 +117,7 @@ impl Session {
         }) = self.search_operation.get_mut()
         {
             if !*search_performed {
-                let mut private = None;
-                let mut label = None;
-
-                attributes.iter().for_each(|attr| match attr {
-                    Attribute::Private(v) => {
-                        private = Some(*v);
-                    }
-                    Attribute::Label(v) => {
-                        label = Some(v.clone());
-                    }
-                    _ => {}
-                });
-
-                *object_ids = self.objects.search(private, label).map_err(SessionError::ObjectStore)?;
+                *object_ids = self.objects.search(attributes).map_err(SessionError::ObjectStore)?;
                 *search_performed = true;
             }
 

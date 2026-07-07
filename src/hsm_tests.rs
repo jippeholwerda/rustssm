@@ -1143,7 +1143,7 @@ fn destroy_object_removes_it() {
 }
 
 #[test]
-fn attribute_value_returns_ec_point_of_public_key() {
+fn object_attribute_returns_ec_point_of_public_key() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
 
@@ -1151,9 +1151,12 @@ fn attribute_value_returns_ec_point_of_public_key() {
         .generate_key_pair(session, &Mechanism::EcKeyPairGen, vec![], vec![])
         .unwrap();
 
-    let der = hsm
-        .attribute_value(session, public_key, AttributeType::EcPoint)
-        .unwrap();
+    let Some(Attribute::EcPoint(der)) = hsm
+        .object_attribute(session, public_key.clone(), AttributeType::EcPoint)
+        .unwrap()
+    else {
+        panic!("public key should expose an EC point");
+    };
 
     // DER octet string wrapping a 65-byte uncompressed SEC1 point.
     assert_eq!(der.len(), 67);
@@ -1161,11 +1164,129 @@ fn attribute_value_returns_ec_point_of_public_key() {
     assert_eq!(der[1], 65); // length
     assert_eq!(der[2], 0x04); // uncompressed point marker
 
-    // The private key is stored as raw bytes and exposes no EC point.
-    assert!(matches!(
-        hsm.attribute_value(session, private_key, AttributeType::EcPoint),
-        Err(HsmError::AttributeTypeInvalid)
-    ));
+    // The private key carries no EC point.
+    assert_eq!(
+        hsm.object_attribute(session, private_key.clone(), AttributeType::EcPoint)
+            .unwrap(),
+        None
+    );
+
+    // Synthesized class and key type are readable on both halves.
+    assert_eq!(
+        hsm.object_attribute(session, public_key, AttributeType::Class).unwrap(),
+        Some(Attribute::Class(crate::attribute::ObjectClass::PublicKey))
+    );
+    assert_eq!(
+        hsm.object_attribute(session, private_key, AttributeType::KeyType).unwrap(),
+        Some(Attribute::KeyType(crate::attribute::KeyType::Ec))
+    );
+}
+
+#[test]
+fn generated_aes_keys_are_searchable_by_synthesized_and_template_attributes() {
+    use crate::attribute::KeyType;
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // Three AES keys sharing a CKA_ID, plus one decoy with a different id.
+    for label in ["a", "b", "c"] {
+        hsm.generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![
+                Attribute::Token(true),
+                Attribute::ValueLen(32),
+                Attribute::Label(String::from(label)),
+                Attribute::Id(b"shared".to_vec()),
+            ],
+        )
+        .unwrap();
+    }
+    hsm.generate_key(
+        session,
+        &Mechanism::AesKeyGen,
+        vec![Attribute::ValueLen(16), Attribute::Id(b"other".to_vec())],
+    )
+    .unwrap();
+
+    // Search by the token-synthesized class/key-type plus the template id.
+    hsm.find_objects_init(
+        session,
+        vec![
+            Attribute::Token(true),
+            Attribute::Id(b"shared".to_vec()),
+            Attribute::Class(ObjectClass::SecretKey),
+            Attribute::KeyType(KeyType::Aes),
+        ],
+    )
+    .unwrap();
+    let found = hsm.find_objects_next(session, 10).unwrap();
+    hsm.find_objects_final(session).unwrap();
+    assert_eq!(found.len(), 3);
+
+    // The synthesized class and key type read back on a found object.
+    let key = found[0].clone();
+    assert_eq!(
+        hsm.object_attribute(session, key.clone(), AttributeType::Class).unwrap(),
+        Some(Attribute::Class(ObjectClass::SecretKey))
+    );
+    assert_eq!(
+        hsm.object_attribute(session, key.clone(), AttributeType::KeyType).unwrap(),
+        Some(Attribute::KeyType(KeyType::Aes))
+    );
+    // A template attribute reads back verbatim.
+    assert_eq!(
+        hsm.object_attribute(session, key, AttributeType::Id).unwrap(),
+        Some(Attribute::Id(b"shared".to_vec()))
+    );
+}
+
+#[test]
+fn generated_rsa_public_key_exposes_derived_attributes() {
+    use crate::attribute::KeyType;
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let (public_key, _private_key) = hsm
+        .generate_key_pair(
+            session,
+            &Mechanism::RsaPkcsKeyPairGen,
+            vec![
+                Attribute::ModulusBits(2048),
+                Attribute::PublicExponent(vec![0x01, 0x00, 0x01]),
+            ],
+            vec![],
+        )
+        .unwrap();
+
+    assert_eq!(
+        hsm.object_attribute(session, public_key.clone(), AttributeType::Class)
+            .unwrap(),
+        Some(Attribute::Class(ObjectClass::PublicKey))
+    );
+    assert_eq!(
+        hsm.object_attribute(session, public_key.clone(), AttributeType::KeyType)
+            .unwrap(),
+        Some(Attribute::KeyType(KeyType::Rsa))
+    );
+    // The public exponent the caller supplied is preserved.
+    assert_eq!(
+        hsm.object_attribute(session, public_key.clone(), AttributeType::PublicExponent)
+            .unwrap(),
+        Some(Attribute::PublicExponent(vec![0x01, 0x00, 0x01]))
+    );
+    // The modulus is derived from the generated key: 2048 bits => 256 bytes.
+    let Some(Attribute::Modulus(modulus)) = hsm
+        .object_attribute(session, public_key, AttributeType::Modulus)
+        .unwrap()
+    else {
+        panic!("public key should expose a modulus");
+    };
+    assert_eq!(modulus.len(), 256);
 }
 
 #[test]

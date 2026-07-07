@@ -1175,28 +1175,32 @@ pub unsafe extern "C" fn C_GetAttributeValue(
         for index in 0..ulCount {
             let attr = unsafe { &mut *pTemplate.add(index as usize) };
 
-            let attribute_type = match attr.type_ {
-                raw::CKA_EC_POINT => AttributeType::EcPoint,
-                _ => {
-                    attr.ulValueLen = raw::CK_UNAVAILABLE_INFORMATION;
-                    result = Err(raw::CKR_ATTRIBUTE_TYPE_INVALID);
-                    continue;
+            // A few attributes every object nominally carries as an empty
+            // value (dates, allowed-mechanism lists we do not restrict).
+            if let Some(value) = fixed_empty_attribute(attr.type_) {
+                if let Err(rv) = unsafe { write_attribute_value(attr, value) } {
+                    result = Err(rv);
                 }
+                continue;
+            }
+
+            let Some(attribute_type) = attribute_type_from_raw(attr.type_) else {
+                attr.ulValueLen = raw::CK_UNAVAILABLE_INFORMATION;
+                result = Err(raw::CKR_ATTRIBUTE_TYPE_INVALID);
+                continue;
             };
 
-            match HSM.attribute_value(session_id, hObject.into(), attribute_type) {
-                Ok(value) => {
-                    if attr.pValue.is_null() {
-                        attr.ulValueLen = value.len() as raw::CK_ULONG;
-                    } else if (attr.ulValueLen as usize) < value.len() {
-                        attr.ulValueLen = raw::CK_UNAVAILABLE_INFORMATION;
-                        result = Err(raw::CKR_BUFFER_TOO_SMALL);
-                    } else {
-                        unsafe {
-                            ptr::copy_nonoverlapping(value.as_ptr(), attr.pValue as raw::CK_BYTE_PTR, value.len());
-                        }
-                        attr.ulValueLen = value.len() as raw::CK_ULONG;
+            match HSM.object_attribute(session_id, hObject.into(), attribute_type) {
+                Ok(Some(attribute)) => {
+                    let value = encode_attribute(&attribute);
+                    if let Err(rv) = unsafe { write_attribute_value(attr, &value) } {
+                        result = Err(rv);
                     }
+                }
+                Ok(None) => {
+                    // The object does not carry this (valid) attribute type.
+                    attr.ulValueLen = raw::CK_UNAVAILABLE_INFORMATION;
+                    result = Err(raw::CKR_ATTRIBUTE_TYPE_INVALID);
                 }
                 Err(error) => {
                     attr.ulValueLen = raw::CK_UNAVAILABLE_INFORMATION;
@@ -1373,57 +1377,46 @@ pub unsafe fn read_attributes(template: raw::CK_ATTRIBUTE_PTR, count: raw::CK_UL
                 }
 
                 match attr.type_ {
-                    raw::CKA_PRIVATE => {
-                        let templateValue = *(attr.pValue as *const raw::CK_BBOOL) == raw::CK_TRUE;
-                        Attribute::Private(templateValue)
-                    }
-                    raw::CKA_TOKEN => {
-                        let templateValue = *(attr.pValue as *const raw::CK_BBOOL) == raw::CK_TRUE;
-                        Attribute::Token(templateValue)
-                    }
-                    raw::CKA_EC_PARAMS => {
-                        if attr.ulValueLen > MAX_ATTRIBUTE_LENGTH {
-                            return Attribute::Unknown;
-                        }
-                        let data = slice::from_raw_parts(attr.pValue as raw::CK_BYTE_PTR, attr.ulValueLen as usize);
-                        Attribute::EcParams(data.to_vec())
-                    }
-                    raw::CKA_LABEL => {
-                        if attr.ulValueLen > MAX_ATTRIBUTE_LENGTH {
-                            return Attribute::Unknown;
-                        }
-                        let data = slice::from_raw_parts(attr.pValue as raw::CK_UTF8CHAR_PTR, attr.ulValueLen as usize);
-                        match String::from_utf8(data.into()) {
-                            Ok(str) => Attribute::Label(str),
-                            Err(_) => Attribute::Unknown,
-                        }
-                    }
-                    raw::CKA_MODULUS_BITS => {
-                        let templateValue = *(attr.pValue as *const raw::CK_ULONG);
-                        Attribute::ModulusBits(templateValue)
-                    }
-                    raw::CKA_VALUE_LEN => {
-                        let templateValue = *(attr.pValue as *const raw::CK_ULONG);
-                        Attribute::ValueLen(templateValue)
-                    }
-                    raw::CKA_VALUE => {
-                        if attr.ulValueLen > MAX_ATTRIBUTE_LENGTH {
-                            return Attribute::Unknown;
-                        }
-                        let data = slice::from_raw_parts(attr.pValue as raw::CK_BYTE_PTR, attr.ulValueLen as usize);
-                        Attribute::Value(data.to_vec())
-                    }
+                    raw::CKA_TOKEN => Attribute::Token(attr_bool(&attr)),
+                    raw::CKA_PRIVATE => Attribute::Private(attr_bool(&attr)),
+                    raw::CKA_SENSITIVE => Attribute::Sensitive(attr_bool(&attr)),
+                    raw::CKA_EXTRACTABLE => Attribute::Extractable(attr_bool(&attr)),
+                    raw::CKA_DERIVE => Attribute::Derive(attr_bool(&attr)),
+                    raw::CKA_SIGN => Attribute::Sign(attr_bool(&attr)),
+                    raw::CKA_VERIFY => Attribute::Verify(attr_bool(&attr)),
+                    raw::CKA_ENCRYPT => Attribute::Encrypt(attr_bool(&attr)),
+                    raw::CKA_DECRYPT => Attribute::Decrypt(attr_bool(&attr)),
+                    raw::CKA_WRAP => Attribute::Wrap(attr_bool(&attr)),
+                    raw::CKA_UNWRAP => Attribute::Unwrap(attr_bool(&attr)),
+
+                    raw::CKA_MODULUS_BITS => Attribute::ModulusBits(attr_ulong(&attr)),
+                    raw::CKA_VALUE_LEN => Attribute::ValueLen(attr_ulong(&attr)),
+
+                    raw::CKA_EC_PARAMS => attr_bytes(&attr).map_or(Attribute::Unknown, Attribute::EcParams),
+                    raw::CKA_EC_POINT => attr_bytes(&attr).map_or(Attribute::Unknown, Attribute::EcPoint),
+                    raw::CKA_ID => attr_bytes(&attr).map_or(Attribute::Unknown, Attribute::Id),
+                    raw::CKA_VALUE => attr_bytes(&attr).map_or(Attribute::Unknown, Attribute::Value),
+                    raw::CKA_MODULUS => attr_bytes(&attr).map_or(Attribute::Unknown, Attribute::Modulus),
+                    raw::CKA_PUBLIC_EXPONENT => attr_bytes(&attr).map_or(Attribute::Unknown, Attribute::PublicExponent),
+
+                    raw::CKA_LABEL => attr_bytes(&attr)
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                        .map_or(Attribute::Unknown, Attribute::Label),
+
                     raw::CKA_CLASS => {
-                        let raw_object_class = *(attr.pValue as *const raw::CK_OBJECT_CLASS);
-                        let object_class = match raw_object_class {
+                        let class = match attr_ulong(&attr) {
+                            raw::CKO_PUBLIC_KEY => ObjectClass::PublicKey,
+                            raw::CKO_PRIVATE_KEY => ObjectClass::PrivateKey,
                             raw::CKO_SECRET_KEY => ObjectClass::SecretKey,
                             _ => ObjectClass::Unknown,
                         };
-                        Attribute::Class(object_class)
+                        Attribute::Class(class)
                     }
                     raw::CKA_KEY_TYPE => {
-                        let raw_key_type = *(attr.pValue as *const raw::CK_KEY_TYPE);
-                        let key_type = match raw_key_type {
+                        let key_type = match attr_ulong(&attr) {
+                            raw::CKK_RSA => KeyType::Rsa,
+                            raw::CKK_EC => KeyType::Ec,
+                            raw::CKK_AES => KeyType::Aes,
                             raw::CKK_GENERIC_SECRET => KeyType::GenericSecret,
                             _ => KeyType::Unknown,
                         };
@@ -1436,6 +1429,153 @@ pub unsafe fn read_attributes(template: raw::CK_ATTRIBUTE_PTR, count: raw::CK_UL
                 }
             })
             .collect::<Vec<_>>()
+    }
+}
+
+/// Reads a `CK_BBOOL` attribute value. The caller must have checked
+/// `pValue` is non-null.
+///
+/// # Safety
+///
+/// Dereferences `attr.pValue`.
+unsafe fn attr_bool(attr: &raw::CK_ATTRIBUTE) -> bool {
+    unsafe { *(attr.pValue as *const raw::CK_BBOOL) == raw::CK_TRUE }
+}
+
+/// Reads a `CK_ULONG` attribute value. The caller must have checked
+/// `pValue` is non-null.
+///
+/// # Safety
+///
+/// Dereferences `attr.pValue`.
+unsafe fn attr_ulong(attr: &raw::CK_ATTRIBUTE) -> raw::CK_ULONG {
+    unsafe { *(attr.pValue as *const raw::CK_ULONG) }
+}
+
+/// Copies a byte-array attribute value, rejecting over-long ones. The caller
+/// must have checked `pValue` is non-null.
+///
+/// # Safety
+///
+/// Dereferences `attr.pValue` for `attr.ulValueLen` bytes.
+unsafe fn attr_bytes(attr: &raw::CK_ATTRIBUTE) -> Option<Vec<u8>> {
+    if attr.ulValueLen > MAX_ATTRIBUTE_LENGTH {
+        return None;
+    }
+    Some(unsafe { slice::from_raw_parts(attr.pValue as raw::CK_BYTE_PTR, attr.ulValueLen as usize) }.to_vec())
+}
+
+/// Maps a raw `CKA_*` type onto the domain [`AttributeType`] the object store
+/// can serve, or `None` for attributes rustssm does not track.
+fn attribute_type_from_raw(type_: raw::CK_ATTRIBUTE_TYPE) -> Option<AttributeType> {
+    Some(match type_ {
+        raw::CKA_CLASS => AttributeType::Class,
+        raw::CKA_KEY_TYPE => AttributeType::KeyType,
+        raw::CKA_TOKEN => AttributeType::Token,
+        raw::CKA_PRIVATE => AttributeType::Private,
+        raw::CKA_SENSITIVE => AttributeType::Sensitive,
+        raw::CKA_EXTRACTABLE => AttributeType::Extractable,
+        raw::CKA_DERIVE => AttributeType::Derive,
+        raw::CKA_SIGN => AttributeType::Sign,
+        raw::CKA_VERIFY => AttributeType::Verify,
+        raw::CKA_ENCRYPT => AttributeType::Encrypt,
+        raw::CKA_DECRYPT => AttributeType::Decrypt,
+        raw::CKA_WRAP => AttributeType::Wrap,
+        raw::CKA_UNWRAP => AttributeType::Unwrap,
+        raw::CKA_LABEL => AttributeType::Label,
+        raw::CKA_ID => AttributeType::Id,
+        raw::CKA_VALUE => AttributeType::Value,
+        raw::CKA_VALUE_LEN => AttributeType::ValueLen,
+        raw::CKA_MODULUS => AttributeType::Modulus,
+        raw::CKA_MODULUS_BITS => AttributeType::ModulusBits,
+        raw::CKA_PUBLIC_EXPONENT => AttributeType::PublicExponent,
+        raw::CKA_EC_PARAMS => AttributeType::EcParams,
+        raw::CKA_EC_POINT => AttributeType::EcPoint,
+        _ => return None,
+    })
+}
+
+/// Attributes that every object reports as present but empty. Clients (and the
+/// rust-cryptoki suite) expect these to be available rather than absent, even
+/// though rustssm imposes no dates and no allowed-mechanism restrictions.
+fn fixed_empty_attribute(type_: raw::CK_ATTRIBUTE_TYPE) -> Option<&'static [u8]> {
+    match type_ {
+        raw::CKA_START_DATE | raw::CKA_END_DATE | raw::CKA_ALLOWED_MECHANISMS => Some(&[]),
+        _ => None,
+    }
+}
+
+/// Encodes a typed [`Attribute`] into the raw PKCS#11 byte representation of
+/// its value.
+fn encode_attribute(attribute: &Attribute) -> Vec<u8> {
+    match attribute {
+        Attribute::Class(class) => encode_class(*class).to_le_bytes().to_vec(),
+        Attribute::KeyType(key_type) => encode_key_type(*key_type).to_le_bytes().to_vec(),
+
+        Attribute::Token(value)
+        | Attribute::Private(value)
+        | Attribute::Sensitive(value)
+        | Attribute::Extractable(value)
+        | Attribute::Derive(value)
+        | Attribute::Sign(value)
+        | Attribute::Verify(value)
+        | Attribute::Encrypt(value)
+        | Attribute::Decrypt(value)
+        | Attribute::Wrap(value)
+        | Attribute::Unwrap(value) => vec![if *value { raw::CK_TRUE } else { raw::CK_FALSE }],
+
+        Attribute::ValueLen(value) | Attribute::ModulusBits(value) => (*value as raw::CK_ULONG).to_le_bytes().to_vec(),
+
+        Attribute::Label(value) => value.clone().into_bytes(),
+        Attribute::Id(value)
+        | Attribute::Value(value)
+        | Attribute::Modulus(value)
+        | Attribute::PublicExponent(value)
+        | Attribute::EcParams(value)
+        | Attribute::EcPoint(value) => value.clone(),
+
+        Attribute::Unknown => Vec::new(),
+    }
+}
+
+fn encode_class(class: ObjectClass) -> raw::CK_ULONG {
+    match class {
+        ObjectClass::PublicKey => raw::CKO_PUBLIC_KEY,
+        ObjectClass::PrivateKey => raw::CKO_PRIVATE_KEY,
+        ObjectClass::SecretKey => raw::CKO_SECRET_KEY,
+        ObjectClass::Unknown => raw::CKO_VENDOR_DEFINED,
+    }
+}
+
+fn encode_key_type(key_type: KeyType) -> raw::CK_ULONG {
+    match key_type {
+        KeyType::Rsa => raw::CKK_RSA,
+        KeyType::Ec => raw::CKK_EC,
+        KeyType::Aes => raw::CKK_AES,
+        KeyType::GenericSecret => raw::CKK_GENERIC_SECRET,
+        KeyType::Unknown => raw::CKK_VENDOR_DEFINED,
+    }
+}
+
+/// Writes an attribute value into a caller-supplied `CK_ATTRIBUTE`, honoring
+/// the length-query / buffer-too-small conventions.
+///
+/// # Safety
+///
+/// Writes through `attr.pValue` when it is non-null.
+unsafe fn write_attribute_value(attr: &mut raw::CK_ATTRIBUTE, value: &[u8]) -> CkResult {
+    if attr.pValue.is_null() {
+        attr.ulValueLen = value.len() as raw::CK_ULONG;
+        Ok(())
+    } else if (attr.ulValueLen as usize) < value.len() {
+        attr.ulValueLen = value.len() as raw::CK_ULONG;
+        Err(raw::CKR_BUFFER_TOO_SMALL)
+    } else {
+        unsafe {
+            ptr::copy_nonoverlapping(value.as_ptr(), attr.pValue as raw::CK_BYTE_PTR, value.len());
+        }
+        attr.ulValueLen = value.len() as raw::CK_ULONG;
+        Ok(())
     }
 }
 
