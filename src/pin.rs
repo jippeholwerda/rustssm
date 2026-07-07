@@ -14,8 +14,7 @@ const MAX_PIN_LENGTH: raw::CK_ULONG = 4096;
 pub struct Pin(String);
 
 impl Pin {
-    #[cfg(test)]
-    pub fn new(pin: impl Into<String>) -> Self {
+    pub(crate) fn new(pin: impl Into<String>) -> Self {
         Self(pin.into())
     }
 

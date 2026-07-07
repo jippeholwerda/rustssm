@@ -494,6 +494,22 @@ impl Hsm {
 
     // ---- key management ----------------------------------------------------
 
+    /// Imports raw key material as a labelled token secret key, the same way
+    /// a generated symmetric key is stored. Used by the provisioning tooling.
+    pub fn import_secret_key(&self, session_id: SessionId, key: Vec<u8>, label: String) -> Result<ObjectId> {
+        let session_lock = self.get_session(session_id)?;
+        let session = session_lock.read().unwrap();
+
+        let attributes = vec![
+            Attribute::Label(label),
+            Attribute::Private(true),
+            Attribute::Token(true),
+        ];
+        self.check_writable(&session, &attributes)?;
+
+        session.write_object(&key, attributes).map_err(store_error)
+    }
+
     pub fn generate_key(
         &self,
         session_id: SessionId,

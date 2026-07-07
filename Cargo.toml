@@ -5,9 +5,22 @@ edition = "2021"
 
 [lib]
 name = "rustssm"
-crate-type = ["cdylib"]
+# `rlib` in addition to `cdylib` so the `rustssm-util` binary can link the
+# crate; the `.so` still exports only the `#[no_mangle]` PKCS#11 symbols.
+crate-type = ["cdylib", "rlib"]
+
+# The provisioning tool is gated behind the `cli` feature so a default build
+# (and the cdylib) never compiles cli-specific dependencies.
+[[bin]]
+name = "rustssm-util"
+path = "src/bin/rustssm-util.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["dep:clap"]
 
 [dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
 aes-kw = { version = "0.3.1" }
 aes-gcm = { version = "0.11.0" }
 der = "0.8.0"

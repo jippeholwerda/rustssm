@@ -12,17 +12,19 @@ Implemented (and exercised by the rust-cryptoki test suite):
   `C_InitToken`, `C_GetInfo`
 - Sessions and authentication: open/close sessions, session info, SO/user
   login, `C_InitPIN`, `C_SetPIN`
-- Key generation: `CKM_GENERIC_SECRET_KEY_GEN`, `CKM_RSA_PKCS_KEY_PAIR_GEN`,
-  `CKM_EC_KEY_PAIR_GEN` (P-256)
+- Key generation: `CKM_GENERIC_SECRET_KEY_GEN`, `CKM_AES_KEY_GEN`,
+  `CKM_RSA_PKCS_KEY_PAIR_GEN`, `CKM_EC_KEY_PAIR_GEN` (P-256)
 - Sign/verify: `CKM_RSA_PKCS`, `CKM_ECDSA`, `CKM_SHA256_HMAC` (single-part)
-- Encryption: `CKM_AES_GCM` (single-part, 96-bit IV, 128-bit tag)
+- Encrypt/decrypt: `CKM_AES_GCM` (single-part; 96- or 256-bit IV; 128-bit tag)
 - Key wrapping: `CKM_AES_KEY_WRAP_PAD`
 - Object search (`C_FindObjects*`, by label/private), `C_DestroyObject`
 - `C_GenerateRandom` / `C_SeedRandom`
 
-Objects are persisted in a SQLite database (`rustssm.db` in the working
+Objects and token state (label, initialized flag, and salted-hashed SO/user
+PINs) are persisted in a SQLite database (`rustssm.db` in the working
 directory; override with `DATABASE_URL`, either a plain path or a
-`sqlite://path` URL).
+`sqlite://path` URL), so a restarted module keeps its tokens and accepts the
+same PINs.
 
 Set `RUSTSSM_LOG=debug` (or `error`/`warn`/`info`/`trace`) to log all calls
 and error returns to stderr, including the resolved database path.
@@ -33,9 +35,37 @@ see the module docs in `src/lib.rs`.
 
 Not implemented: `C_CreateObject`/`C_CopyObject`, attribute storage/readback
 (only `CKA_EC_POINT` of P-256 public keys), digests, multipart operations,
-decryption, AES key generation, EdDSA, and mechanisms not listed above.
-Unsupported calls return `CKR_FUNCTION_NOT_SUPPORTED` /
-`CKR_MECHANISM_INVALID`. See [TODO.md](TODO.md) for the roadmap.
+RSA/AES-CBC encryption, EdDSA, and mechanisms not listed above. Unsupported
+calls return `CKR_FUNCTION_NOT_SUPPORTED` / `CKR_MECHANISM_INVALID`. See
+[TODO.md](TODO.md) for the roadmap.
+
+## Provisioning a token
+
+The `rustssm-util` binary provisions tokens directly in the store — a rough
+analogue of `softhsm2-util` — so an operator can prepare a token a client logs
+into at startup, without going through the PKCS#11 API. It is gated behind the
+`cli` feature so a default build (and the cdylib) never pulls in `clap`:
+
+```sh
+cargo build --release --features cli   # builds target/release/rustssm-util
+
+# Initialize a token on the first free slot, set the user PIN:
+rustssm-util --database /path/to/rustssm.db init-token \
+    --free --label "my token" --so-pin <SO_PIN> --user-pin <USER_PIN>
+
+# List slots and their token state:
+rustssm-util --database /path/to/rustssm.db show-slots
+
+# Import a raw AES key (the file's bytes are the key) as a secret-key object:
+rustssm-util --database /path/to/rustssm.db import \
+    --aes ./wrapping.key --label wrapping_key --user-pin <USER_PIN> --token "my token"
+```
+
+`init-token` selects a slot with one of `--free`, `--slot <N>` or
+`--token <LABEL>`. The `--database` path (or `DATABASE_URL`) must match the one
+the loaded module uses. Initializing a token destroys any objects already in
+the store, and — as with the PKCS#11 API — PINs are stored as salted hashes,
+never in plaintext.
 
 ## Building
 

@@ -150,9 +150,19 @@ TODOs, roughly in dependency order:
       SHA-256 (`PinHash`), never plaintext. (A stolen DB already exposes the
       keys, so this is hygiene, not a slow-KDF defence; layer Argon2 if that
       changes.)
-- [ ] **Token-init tooling** — an equivalent of `softhsm2-util
-      --init-token` so an operator can initialize the token and set the user
-      PIN outside the wallet process.
+- [x] **Token-init tooling (Tier 1)** — the `rustssm-util` binary (`src/bin`,
+      backed by `src/admin.rs`, gated behind the `cli` feature so the cdylib
+      never pulls clap) covers the `softhsm2-util` roles the nl-wallet devenv
+      uses: `show-slots`, `init-token` (`--free`/`--slot`/`--token`), and
+      `import --aes` (raw AES key from a file → labelled secret key). It drives
+      the same `Hsm` init_token/init_pin/import path as the PKCS#11 API. (Crate
+      is now `cdylib` + `rlib` so the binary can link it.)
+- [ ] **Token-init tooling (Tier 2)** — the devenv also uses `p11tool`
+      *through the module* (`--list-token-urls`, `--login --write
+      --secret-key`). Blocked on `C_CreateObject` (see object management above)
+      and a token `model` string decision: rustssm reports `model = "rustssm"`,
+      so the devenv's `grep 'model=SoftHSM%20v2'` on p11tool output finds no
+      token URL. Either report a SoftHSM-compatible model or adjust the script.
 - [ ] **Session-object lifecycle** — nl-wallet creates session keys with
       `Token(false)` (`generate_session_signing_key_pair`, unwrapped signing
       keys) and relies on the HSM cleaning them up; rustssm ignores

@@ -44,6 +44,7 @@ use crate::slot::UserType;
 use crate::util::padded;
 use crate::util::random_bytes;
 
+pub mod admin;
 mod attribute;
 mod hsm;
 mod logging;
