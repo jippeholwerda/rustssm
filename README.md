@@ -17,7 +17,8 @@ Implemented (and exercised by the rust-cryptoki test suite):
 - Sign/verify: `CKM_RSA_PKCS`, `CKM_ECDSA`, `CKM_SHA256_HMAC` (single-part)
 - Encrypt/decrypt: `CKM_AES_GCM` (single-part; 96- or 256-bit IV; 128-bit tag)
 - Key wrapping: `CKM_AES_KEY_WRAP_PAD`
-- Object search (`C_FindObjects*`, by label/private), `C_DestroyObject`
+- Object creation/search: `C_CreateObject` (secret keys via `CKA_VALUE`),
+  `C_FindObjects*` (by label/private), `C_DestroyObject`
 - `C_GenerateRandom` / `C_SeedRandom`
 
 Objects and token state (label, initialized flag, and salted-hashed SO/user
@@ -33,11 +34,11 @@ Error policy: expected failures return `CK_RV` codes; panics indicate broken
 internal invariants and deliberately abort the host process (crash-only) —
 see the module docs in `src/lib.rs`.
 
-Not implemented: `C_CreateObject`/`C_CopyObject`, attribute storage/readback
-(only `CKA_EC_POINT` of P-256 public keys), digests, multipart operations,
-RSA/AES-CBC encryption, EdDSA, and mechanisms not listed above. Unsupported
-calls return `CKR_FUNCTION_NOT_SUPPORTED` / `CKR_MECHANISM_INVALID`. See
-[TODO.md](TODO.md) for the roadmap.
+Not implemented: `C_CreateObject` for non-secret-key classes, `C_CopyObject`,
+attribute readback beyond `CKA_EC_POINT` of P-256 public keys, digests,
+multipart operations, RSA/AES-CBC encryption, EdDSA, and mechanisms not listed
+above. Unsupported calls return `CKR_FUNCTION_NOT_SUPPORTED` /
+`CKR_MECHANISM_INVALID`. See [TODO.md](TODO.md) for the roadmap.
 
 ## Provisioning a token
 

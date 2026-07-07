@@ -101,6 +101,7 @@ fn pkcs11_end_to_end() {
     let c_login = fl.C_Login.unwrap();
     let c_logout = fl.C_Logout.unwrap();
     let c_destroy_object = fl.C_DestroyObject.unwrap();
+    let c_create_object = fl.C_CreateObject.unwrap();
     let c_generate_key = fl.C_GenerateKey.unwrap();
     let c_generate_key_pair = fl.C_GenerateKeyPair.unwrap();
     let c_sign_init = fl.C_SignInit.unwrap();
@@ -510,6 +511,53 @@ fn pkcs11_end_to_end() {
         },
         raw::CKR_ENCRYPTED_DATA_INVALID
     );
+
+    // --- C_CreateObject: import an AES key from a known value -----------
+    let key_class: raw::CK_OBJECT_CLASS = raw::CKO_SECRET_KEY;
+    let aes_key_type: raw::CK_KEY_TYPE = raw::CKK_AES;
+    let raw_key = [0x2Bu8; 32];
+    let ck_true: raw::CK_BBOOL = raw::CK_TRUE as raw::CK_BBOOL;
+    let created_label = b"imported-aes";
+    let create_template = [
+        attr(raw::CKA_CLASS, &key_class, size_of::<raw::CK_OBJECT_CLASS>()),
+        attr(raw::CKA_KEY_TYPE, &aes_key_type, size_of::<raw::CK_KEY_TYPE>()),
+        attr(raw::CKA_VALUE, raw_key.as_ptr(), raw_key.len()),
+        attr(raw::CKA_LABEL, created_label.as_ptr(), created_label.len()),
+        attr(raw::CKA_TOKEN, &ck_true, size_of::<raw::CK_BBOOL>()),
+        attr(raw::CKA_PRIVATE, &ck_true, size_of::<raw::CK_BBOOL>()),
+    ];
+    let mut created_key: raw::CK_OBJECT_HANDLE = 0;
+    assert_eq!(
+        unsafe {
+            c_create_object(
+                session,
+                create_template.as_ptr() as *mut _,
+                create_template.len() as raw::CK_ULONG,
+                &mut created_key,
+            )
+        },
+        raw::CKR_OK
+    );
+
+    // The imported key must be usable: encrypt with it under AES-GCM.
+    assert_eq!(
+        unsafe { c_encrypt_init(session, &gcm as *const _ as *mut _, created_key) },
+        raw::CKR_OK
+    );
+    let mut created_ct_len: raw::CK_ULONG = 0;
+    assert_eq!(
+        unsafe {
+            c_encrypt(
+                session,
+                plaintext.as_ptr() as *mut u8,
+                plaintext.len() as raw::CK_ULONG,
+                ptr::null_mut(),
+                &mut created_ct_len,
+            )
+        },
+        raw::CKR_OK
+    );
+    assert_eq!(created_ct_len, plaintext.len() as raw::CK_ULONG + 16);
 
     // --- error mapping: unsupported mechanism, invalid session ----------
     let mut ignored: raw::CK_OBJECT_HANDLE = 0;

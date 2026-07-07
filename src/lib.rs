@@ -97,6 +97,7 @@ fn rv_from(error: HsmError) -> raw::CK_RV {
         HsmError::OperationNotInitialized => raw::CKR_OPERATION_NOT_INITIALIZED,
         HsmError::MechanismInvalid => raw::CKR_MECHANISM_INVALID,
         HsmError::TemplateIncomplete => raw::CKR_TEMPLATE_INCOMPLETE,
+        HsmError::TemplateInconsistent => raw::CKR_TEMPLATE_INCONSISTENT,
         HsmError::AttributeValueInvalid => raw::CKR_ATTRIBUTE_VALUE_INVALID,
         HsmError::AttributeTypeInvalid => raw::CKR_ATTRIBUTE_TYPE_INVALID,
         HsmError::KeyHandleInvalid => raw::CKR_KEY_HANDLE_INVALID,
@@ -801,6 +802,36 @@ pub unsafe extern "C" fn C_Verify(
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// Dereferencing
+pub unsafe extern "C" fn C_CreateObject(
+    hSession: raw::CK_SESSION_HANDLE,
+    pTemplate: raw::CK_ATTRIBUTE_PTR,
+    ulCount: raw::CK_ULONG,
+    phObject: raw::CK_OBJECT_HANDLE_PTR,
+) -> raw::CK_RV {
+    ck("C_CreateObject", || {
+        debug!("C_CreateObject");
+
+        if phObject.is_null() {
+            return Err(raw::CKR_ARGUMENTS_BAD);
+        }
+
+        let attributes = unsafe { read_attributes(pTemplate, ulCount) };
+        debug!("C_CreateObject attributes: {:?}", &attributes);
+
+        let object_id = HSM.create_object(SessionId(hSession), attributes).ck()?;
+
+        unsafe {
+            *phObject = object_id.into();
+        }
+
+        Ok(())
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn C_DestroyObject(hSession: raw::CK_SESSION_HANDLE, hObject: raw::CK_OBJECT_HANDLE) -> raw::CK_RV {
     ck("C_DestroyObject", || {
         debug!("C_DestroyObject");
@@ -1219,7 +1250,7 @@ static FUNCTION_LIST: raw::CK_FUNCTION_LIST = raw::CK_FUNCTION_LIST {
     C_SetOperationState: None,
     C_Login: Some(C_Login),
     C_Logout: Some(C_Logout),
-    C_CreateObject: None,
+    C_CreateObject: Some(C_CreateObject),
     C_CopyObject: None,
     C_DestroyObject: Some(C_DestroyObject),
     C_GetObjectSize: None,
@@ -1374,6 +1405,13 @@ pub unsafe fn read_attributes(template: raw::CK_ATTRIBUTE_PTR, count: raw::CK_UL
                     raw::CKA_VALUE_LEN => {
                         let templateValue = *(attr.pValue as *const raw::CK_ULONG);
                         Attribute::ValueLen(templateValue)
+                    }
+                    raw::CKA_VALUE => {
+                        if attr.ulValueLen > MAX_ATTRIBUTE_LENGTH {
+                            return Attribute::Unknown;
+                        }
+                        let data = slice::from_raw_parts(attr.pValue as raw::CK_BYTE_PTR, attr.ulValueLen as usize);
+                        Attribute::Value(data.to_vec())
                     }
                     raw::CKA_CLASS => {
                         let raw_object_class = *(attr.pValue as *const raw::CK_OBJECT_CLASS);

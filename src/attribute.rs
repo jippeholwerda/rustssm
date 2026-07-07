@@ -8,6 +8,7 @@ pub enum Attribute {
     Class(ObjectClass),
     KeyType(KeyType),
     ValueLen(u64),
+    Value(Vec<u8>),
     Unknown,
 }
 

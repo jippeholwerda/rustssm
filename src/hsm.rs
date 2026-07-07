@@ -20,6 +20,7 @@ use thiserror::Error;
 
 use crate::attribute::Attribute;
 use crate::attribute::AttributeType;
+use crate::attribute::ObjectClass;
 use crate::mechanism::Mechanism;
 use crate::object_store::ObjectId;
 use crate::object_store::ObjectStore;
@@ -103,6 +104,9 @@ pub enum HsmError {
 
     #[error("template incomplete")]
     TemplateIncomplete,
+
+    #[error("template inconsistent")]
+    TemplateInconsistent,
 
     #[error("attribute value invalid")]
     AttributeValueInvalid,
@@ -493,6 +497,42 @@ impl Hsm {
     }
 
     // ---- key management ----------------------------------------------------
+
+    /// Creates an object from a template. Only secret keys (`CKO_SECRET_KEY`
+    /// with `CKA_VALUE`) are supported; the value bytes are stored like a
+    /// generated or imported symmetric key. Other classes are rejected as
+    /// inconsistent.
+    pub fn create_object(&self, session_id: SessionId, attributes: Vec<Attribute>) -> Result<ObjectId> {
+        let session_lock = self.get_session(session_id)?;
+        let session = session_lock.read().unwrap();
+
+        self.check_writable(&session, &attributes)?;
+
+        let class = attributes.iter().find_map(|attr| match attr {
+            Attribute::Class(class) => Some(class),
+            _ => None,
+        });
+
+        match class {
+            Some(ObjectClass::SecretKey) => {
+                let value = attributes
+                    .iter()
+                    .find_map(|attr| match attr {
+                        Attribute::Value(bytes) => Some(bytes.clone()),
+                        _ => None,
+                    })
+                    .ok_or(HsmError::TemplateIncomplete)?;
+
+                if value.is_empty() {
+                    return Err(HsmError::AttributeValueInvalid);
+                }
+
+                session.write_object(&value, attributes).map_err(store_error)
+            }
+            Some(ObjectClass::Unknown) => Err(HsmError::TemplateInconsistent),
+            None => Err(HsmError::TemplateIncomplete),
+        }
+    }
 
     /// Imports raw key material as a labelled token secret key, the same way
     /// a generated symmetric key is stored. Used by the provisioning tooling.

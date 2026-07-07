@@ -11,11 +11,13 @@ bugs; each item below names the tests it unlocks. (`CKM_AES_KEY_GEN` unlocked
 
 ### Object management (biggest unlock, ~14 tests)
 
-- [ ] `C_CreateObject` — import objects from templates (AES keys via
-      `CKA_VALUE`, RSA public keys via `CKA_MODULUS`/`CKA_PUBLIC_EXPONENT`).
-      Must enforce `CKR_SESSION_READ_ONLY` for token objects in RO sessions,
-      and reject read-only attributes (`CKA_UNIQUE_ID`, validation flags) with
-      `CKR_ATTRIBUTE_TYPE_INVALID`.
+- [~] `C_CreateObject` — secret keys (`CKO_SECRET_KEY` via `CKA_VALUE`) are
+      implemented and enforce `CKR_SESSION_READ_ONLY` for token objects in RO
+      sessions; validated against `p11tool --write --secret-key`. Still TODO:
+      RSA public keys via `CKA_MODULUS`/`CKA_PUBLIC_EXPONENT`, and rejecting
+      read-only attributes (`CKA_UNIQUE_ID`, validation flags) with
+      `CKR_ATTRIBUTE_TYPE_INVALID`. The referencing tests below also need
+      attribute readback before they go green.
       → `aes_cbc_encrypt`, `aes_cbc_pad_encrypt`, `aes_gcm_with_aad`,
       `ro_rw_session_test`, `import_export`, `unique_id`, `validation`,
       `aes_cmac_sign`, `aes_cmac_verify`, `ekdf_aes_cbc_encrypt_data`
@@ -157,12 +159,16 @@ TODOs, roughly in dependency order:
       `import --aes` (raw AES key from a file → labelled secret key). It drives
       the same `Hsm` init_token/init_pin/import path as the PKCS#11 API. (Crate
       is now `cdylib` + `rlib` so the binary can link it.)
-- [ ] **Token-init tooling (Tier 2)** — the devenv also uses `p11tool`
-      *through the module* (`--list-token-urls`, `--login --write
-      --secret-key`). Blocked on `C_CreateObject` (see object management above)
-      and a token `model` string decision: rustssm reports `model = "rustssm"`,
-      so the devenv's `grep 'model=SoftHSM%20v2'` on p11tool output finds no
-      token URL. Either report a SoftHSM-compatible model or adjust the script.
+- [x] **Token-init tooling (Tier 2)** — the devenv's `p11tool` calls run
+      *through the module*. `--list-token-urls` and `--login --write
+      --secret-key` both work against rustssm now (secret-key `C_CreateObject`
+      landed and was validated with real `p11tool 3.8.13`). Decision: keep the
+      honest `model = "rustssm"`; the devenv's `grep 'model=SoftHSM%20v2'` must
+      change to `model=rustssm` (a one-line edit on the nl-wallet side).
+      Remaining nicety (own item below): `p11tool` can't *display* a created
+      object's label/type because `C_GetAttributeValue` only serves
+      `CKA_EC_POINT` — functionally fine, since nl-wallet finds keys by label
+      via `C_FindObjects`, which works.
 - [ ] **Session-object lifecycle** — nl-wallet creates session keys with
       `Token(false)` (`generate_session_signing_key_pair`, unwrapped signing
       keys) and relies on the HSM cleaning them up; rustssm ignores

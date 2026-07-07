@@ -1041,6 +1041,93 @@ fn find_objects_init_twice_is_rejected() {
 }
 
 #[test]
+fn create_secret_key_object_is_stored_and_usable() {
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let key_bytes = vec![0x2Bu8; 32];
+    let object = hsm
+        .create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::SecretKey),
+                Attribute::Value(key_bytes.clone()),
+                Attribute::Label(String::from("created")),
+                Attribute::Token(true),
+                Attribute::Private(true),
+            ],
+        )
+        .unwrap();
+
+    // Stored verbatim and usable as an AES key.
+    let stored: Vec<u8> = hsm.object_store().unwrap().read(&object).unwrap();
+    assert_eq!(stored, key_bytes);
+
+    hsm.find_objects_init(session, vec![Attribute::Label(String::from("created"))])
+        .unwrap();
+    let found = hsm.find_objects_next(session, 10).unwrap();
+    hsm.find_objects_final(session).unwrap();
+    assert_eq!(found, vec![object]);
+}
+
+#[test]
+fn create_object_rejects_bad_templates() {
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // Missing CKA_CLASS.
+    assert!(matches!(
+        hsm.create_object(session, vec![Attribute::Value(vec![0u8; 32])]),
+        Err(HsmError::TemplateIncomplete)
+    ));
+    // Secret key without CKA_VALUE.
+    assert!(matches!(
+        hsm.create_object(session, vec![Attribute::Class(ObjectClass::SecretKey)]),
+        Err(HsmError::TemplateIncomplete)
+    ));
+    // Empty value.
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![Attribute::Class(ObjectClass::SecretKey), Attribute::Value(vec![])],
+        ),
+        Err(HsmError::AttributeValueInvalid)
+    ));
+    // Unsupported object class (parsed as Unknown).
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![Attribute::Class(ObjectClass::Unknown), Attribute::Value(vec![0u8; 32])],
+        ),
+        Err(HsmError::TemplateInconsistent)
+    ));
+}
+
+#[test]
+fn create_token_object_in_read_only_session_is_rejected() {
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = hsm.open_session(SLOT, SessionState::ReadOnly).unwrap();
+
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::SecretKey),
+                Attribute::Value(vec![0u8; 32]),
+                Attribute::Token(true),
+            ],
+        ),
+        Err(HsmError::SessionReadOnly)
+    ));
+}
+
+#[test]
 fn destroy_object_removes_it() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
