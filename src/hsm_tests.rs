@@ -1502,6 +1502,106 @@ fn copy_object_rejects_security_downgrades_and_read_only_overrides() {
 }
 
 #[test]
+fn session_objects_are_destroyed_when_their_session_closes() {
+    let hsm = hsm_with_token();
+    let creator = user_session(&hsm);
+    let other = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+
+    // A generated key with no CKA_TOKEN(true) is a session object.
+    let key = hsm
+        .generate_key(creator, &Mechanism::AesKeyGen, vec![Attribute::ValueLen(32)])
+        .unwrap();
+
+    // Visible to another live session while the creator is open.
+    assert!(hsm.object_exists(other, key.clone()).unwrap());
+
+    hsm.close_session(creator).unwrap();
+
+    // Gone once the creating session closes.
+    assert!(!hsm.object_exists(other, key).unwrap());
+}
+
+#[test]
+fn token_objects_outlive_their_creating_session() {
+    let hsm = hsm_with_token();
+    let creator = user_session(&hsm);
+
+    let key = hsm
+        .generate_key(
+            creator,
+            &Mechanism::AesKeyGen,
+            vec![Attribute::ValueLen(32), Attribute::Token(true)],
+        )
+        .unwrap();
+
+    hsm.close_session(creator).unwrap();
+
+    let other = user_session(&hsm);
+    assert!(hsm.object_exists(other, key).unwrap());
+}
+
+#[test]
+fn session_objects_do_not_survive_a_restart() {
+    let path = std::env::temp_dir().join(format!("rustssm-session-obj-{}.db", std::process::id()));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+
+    let token_key;
+    {
+        let hsm = Hsm::with_store(ObjectStore::at_path(&path).unwrap());
+        hsm.initialize().unwrap();
+        hsm.init_token(&SLOT, Pin::new(SO_PIN), Some(String::from("persisted")))
+            .unwrap();
+        let session = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+        hsm.login(session, UserType::So, Pin::new(SO_PIN)).unwrap();
+        hsm.init_pin(session, Pin::new(USER_PIN)).unwrap();
+        hsm.logout(session).unwrap();
+        hsm.login(session, UserType::User, Pin::new(USER_PIN)).unwrap();
+
+        // One token object and one session object; the process ends without
+        // closing the session (simulating a crash).
+        token_key = hsm
+            .generate_key(
+                session,
+                &Mechanism::AesKeyGen,
+                vec![
+                    Attribute::ValueLen(32),
+                    Attribute::Token(true),
+                    Attribute::Label(String::from("tok")),
+                ],
+            )
+            .unwrap();
+        hsm.generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![Attribute::ValueLen(32), Attribute::Label(String::from("ephemeral"))],
+        )
+        .unwrap();
+    }
+
+    {
+        let hsm = Hsm::with_store(ObjectStore::at_path(&path).unwrap());
+        hsm.initialize().unwrap();
+        let session = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+        hsm.login(session, UserType::User, Pin::new(USER_PIN)).unwrap();
+
+        // The token object survives; the leftover session object is purged.
+        assert!(hsm.object_exists(session, token_key).unwrap());
+
+        hsm.find_objects_init(session, vec![Attribute::Label(String::from("ephemeral"))])
+            .unwrap();
+        let found = hsm.find_objects_next(session, 10).unwrap();
+        hsm.find_objects_final(session).unwrap();
+        assert!(found.is_empty());
+    }
+
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+#[test]
 fn operations_on_invalid_session_are_rejected() {
     let hsm = hsm_with_token();
     let bogus = SessionId(4242);

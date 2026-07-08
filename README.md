@@ -34,11 +34,13 @@ Implemented (and exercised by the rust-cryptoki test suite):
   attributes are rejected as read-only, unknown types as invalid
 - `C_GenerateRandom` / `C_SeedRandom`
 
-Objects and token state (label, initialized flag, and salted-hashed SO/user
-PINs) are persisted in a SQLite database (`rustssm.db` in the working
+Token objects and token state (label, initialized flag, and salted-hashed
+SO/user PINs) are persisted in a SQLite database (`rustssm.db` in the working
 directory; override with `DATABASE_URL`, either a plain path or a
 `sqlite://path` URL), so a restarted module keeps its tokens and accepts the
-same PINs.
+same PINs. Session objects (`CKA_TOKEN` false) are destroyed when the session
+that created them closes, and any left behind by a crash are purged on the
+next `C_Initialize`.
 
 Set `RUSTSSM_LOG=debug` (or `error`/`warn`/`info`/`trace`) to log all calls
 and error returns to stderr, including the resolved database path.

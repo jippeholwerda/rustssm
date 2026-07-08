@@ -215,9 +215,16 @@ impl Hsm {
             return Err(HsmError::AlreadyInitialized);
         }
         // Load persisted token state so a restarted process sees the same
-        // tokens (and accepts the same PINs). Roll back on failure so the
-        // caller can retry once the store is reachable.
-        if let Err(error) = self.hydrate_slots() {
+        // tokens (and accepts the same PINs), and drop any session objects
+        // left behind by a previous process (their owning sessions are gone).
+        // Roll back on failure so the caller can retry once the store is
+        // reachable.
+        let result = self.hydrate_slots().and_then(|()| {
+            self.object_store()?
+                .purge_session_objects()
+                .map_err(HsmError::ObjectStore)
+        });
+        if let Err(error) = result {
             self.initialized.store(false, Ordering::SeqCst);
             return Err(error);
         }
@@ -259,12 +266,19 @@ impl Hsm {
             return Err(HsmError::NotInitialized);
         }
 
-        let slots = self.slots.read().unwrap();
-        for slot_lock in slots.values() {
-            let mut slot = slot_lock.write().unwrap();
-            slot.sessions.write().unwrap().clear();
-            slot.current_user_type = None;
+        {
+            let slots = self.slots.read().unwrap();
+            for slot_lock in slots.values() {
+                let mut slot = slot_lock.write().unwrap();
+                slot.sessions.write().unwrap().clear();
+                slot.current_user_type = None;
+            }
         }
+
+        // All sessions are gone, so their session objects must go too.
+        self.object_store()?
+            .purge_session_objects()
+            .map_err(HsmError::ObjectStore)?;
         Ok(())
     }
 
@@ -352,7 +366,7 @@ impl Hsm {
         }
 
         let session_id = SessionId(self.next_session_id.fetch_add(1, Ordering::Relaxed));
-        let session = Session::new(slot_id, state, store);
+        let session = Session::new(session_id, slot_id, state, store);
         slot.sessions
             .write()
             .unwrap()
@@ -361,6 +375,7 @@ impl Hsm {
     }
 
     pub fn close_session(&self, session_id: SessionId) -> Result<()> {
+        let store = self.object_store()?;
         let slot_lock = self
             .find_by_session_id(session_id)
             .ok_or(HsmError::SessionNotFound(session_id))?;
@@ -376,6 +391,12 @@ impl Hsm {
         if no_sessions_left {
             slot.current_user_type = None;
         }
+        drop(slot);
+
+        // Session objects live only as long as the session that created them.
+        store
+            .delete_session_objects(session_id.0)
+            .map_err(HsmError::ObjectStore)?;
         Ok(())
     }
 

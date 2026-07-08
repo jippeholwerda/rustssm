@@ -185,13 +185,16 @@ TODOs, roughly in dependency order:
       object's label/type because `C_GetAttributeValue` only serves
       `CKA_EC_POINT` — functionally fine, since nl-wallet finds keys by label
       via `C_FindObjects`, which works.
-- [ ] **Session-object lifecycle** — nl-wallet creates session keys with
+- [x] **Session-object lifecycle** — nl-wallet creates session keys with
       `Token(false)` (`generate_session_signing_key_pair`, unwrapped signing
-      keys) and relies on the HSM cleaning them up; rustssm ignores
-      `CKA_TOKEN` and persists everything to the database. Store session
-      objects in memory (or delete on session close) so they don't leak into
-      the token store. Also relevant: their PVW-5862 notes assume session
-      objects die with the session.
+      keys) and relies on the HSM cleaning them up. Objects carry an
+      `owner_session` column: `NULL` for token objects (persistent),
+      otherwise the creating session's id. Session objects are deleted when
+      that session closes (`C_CloseSession`) and every session object is
+      purged on `C_Initialize`/`C_Finalize` (session ids don't survive a
+      process, so any left behind is a crash orphan). Token objects
+      (`CKA_TOKEN` true) are unaffected. Matches their PVW-5862 assumption
+      that session objects die with the session.
 - [ ] **Validate `CKA_EC_PARAMS`** — nl-wallet passes the P-256 OID
       explicitly; rustssm ignores the attribute and silently assumes P-256.
       Reject other curves with `CKR_CURVE_NOT_SUPPORTED`.

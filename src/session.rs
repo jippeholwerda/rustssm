@@ -35,6 +35,7 @@ pub enum SessionState {
 }
 
 pub struct Session {
+    pub session_id: SessionId,
     pub slot_id: SlotId,
     pub state: SessionState,
     objects: Arc<ObjectStore>,
@@ -59,8 +60,9 @@ impl SearchOperation {
 }
 
 impl Session {
-    pub fn new(slot_id: SlotId, state: SessionState, objects: Arc<ObjectStore>) -> Self {
+    pub fn new(session_id: SessionId, slot_id: SlotId, state: SessionState, objects: Arc<ObjectStore>) -> Self {
         Self {
+            session_id,
             slot_id,
             state,
             objects,
@@ -69,12 +71,25 @@ impl Session {
         }
     }
 
+    /// The owner recorded for an object with these attributes: `None` for a
+    /// token object (`CKA_TOKEN` true, persistent), otherwise this session,
+    /// so the object is destroyed when the session closes.
+    fn owner_for(&self, attributes: &[Attribute]) -> Option<u64> {
+        let token_object = attributes.iter().any(|attr| matches!(attr, Attribute::Token(true)));
+        if token_object {
+            None
+        } else {
+            Some(self.session_id.0)
+        }
+    }
+
     pub fn write_object<T>(&self, object: &T, attributes: Vec<Attribute>) -> Result<ObjectId, SessionError>
     where
         T: Serialize + ?Sized,
     {
+        let owner = self.owner_for(&attributes);
         self.objects
-            .write(attributes, object)
+            .write(attributes, object, owner)
             .map_err(SessionError::ObjectStore)
     }
 
@@ -92,13 +107,17 @@ impl Session {
     }
 
     pub fn set_object_attributes(&self, object_id: &ObjectId, attributes: Vec<Attribute>) -> Result<(), SessionError> {
+        let owner = self.owner_for(&attributes);
         self.objects
-            .set_attributes(object_id, attributes)
+            .set_attributes(object_id, attributes, owner)
             .map_err(SessionError::ObjectStore)
     }
 
     pub fn copy_object(&self, source: &ObjectId, attributes: Vec<Attribute>) -> Result<ObjectId, SessionError> {
-        self.objects.copy(source, attributes).map_err(SessionError::ObjectStore)
+        let owner = self.owner_for(&attributes);
+        self.objects
+            .copy(source, attributes, owner)
+            .map_err(SessionError::ObjectStore)
     }
 
     pub fn object_exists(&self, object_id: &ObjectId) -> bool {
