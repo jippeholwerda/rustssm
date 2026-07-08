@@ -208,11 +208,16 @@ TODOs, roughly in dependency order:
       rustssm stores only the key bytes. Fine for the immediate
       unwrap-then-sign flow, but attribute-aware `find_objects`/
       `C_GetAttributeValue` (section 1) should include these objects.
-- [ ] Point nl-wallet at rustssm for integration testing: set
-      `library_path` in `wallet_core/lib/hsm/hsm.toml` to
-      `.../rustssm/target/release/librustssm.so` (it currently points at
-      SoftHSM) and run the `hsm_test`-gated tests in
-      `wallet_core/lib/hsm/tests/hsm.rs`.
+- [x] Point nl-wallet at rustssm for integration testing: set `library_path`
+      in `wallet_core/lib/hsm/hsm.toml` to
+      `.../rustssm/target/release/librustssm.so`, provision a token whose user
+      PIN matches the toml (`rustssm-util --database <db> init-token --free
+      --label nl-wallet-test --so-pin <sopin> --user-pin 12345678`), then run
+      with the module pointed at the same store:
+      `DATABASE_URL=<db> cargo test -p hsm --features hsm_test --test hsm`.
+      **All 5 cases pass** (`sign_sha256_hmac`, `sign_ecdsa`, `encrypt_decrypt`,
+      `encrypt_decrypt_verifying_key`, `wrap_key_and_sign`) — exercises
+      nl-wallet's `Pkcs11Hsm` + the r2d2-cryptoki session pool end-to-end.
 
 Critical path for nl-wallet: AES key generation → GCM decrypt → arbitrary
 GCM IV length → persistent token state. Critical path for the rust-cryptoki

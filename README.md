@@ -72,9 +72,11 @@ rustssm-util --database /path/to/rustssm.db init-token \
 # List slots and their token state:
 rustssm-util --database /path/to/rustssm.db show-slots
 
-# Import a raw AES key (the file's bytes are the key) as a secret-key object:
+# Import a raw AES key (the file's bytes are the key) as a secret-key object.
+# --id is optional and hex-encoded, matching `softhsm2-util --id`:
 rustssm-util --database /path/to/rustssm.db import \
-    --aes ./wrapping.key --label wrapping_key --user-pin <USER_PIN> --token "my token"
+    --aes ./wrapping.key --label wrapping_key --id 6b6579 \
+    --user-pin <USER_PIN> --token "my token"
 ```
 
 `init-token` selects a slot with one of `--free`, `--slot <N>` or

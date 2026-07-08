@@ -571,16 +571,25 @@ impl Hsm {
 
     /// Imports raw key material as a labelled token secret key, the same way
     /// a generated symmetric key is stored.
-    pub fn import_secret_key(&self, session_id: SessionId, key: Vec<u8>, label: String) -> Result<ObjectId> {
+    pub fn import_secret_key(
+        &self,
+        session_id: SessionId,
+        key: Vec<u8>,
+        label: String,
+        id: Option<Vec<u8>>,
+    ) -> Result<ObjectId> {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
-        let attributes = vec![
+        let mut attributes = vec![
             Attribute::Class(ObjectClass::SecretKey),
             Attribute::Label(label),
             Attribute::Private(true),
             Attribute::Token(true),
         ];
+        if let Some(id) = id {
+            attributes.push(Attribute::Id(id));
+        }
         self.check_writable(&session, &attributes)?;
 
         session.write_object(&key, attributes).map_err(store_error)

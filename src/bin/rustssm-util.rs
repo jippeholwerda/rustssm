@@ -66,12 +66,27 @@ struct ImportArgs {
     #[arg(long)]
     label: String,
 
+    /// Object id (`CKA_ID`), hex-encoded.
+    #[arg(long)]
+    id: Option<String>,
+
     /// User PIN (a login is required to create the object).
     #[arg(long)]
     user_pin: String,
 
     #[command(flatten)]
     target: TargetSlotArg,
+}
+
+/// Decodes a hex string into bytes `--id`.
+fn parse_hex(value: &str) -> Result<Vec<u8>, String> {
+    if !value.len().is_multiple_of(2) {
+        return Err(String::from("hex value must have an even number of digits"));
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&value[i..i + 2], 16).map_err(|_| format!("invalid hex: {value}")))
+        .collect()
 }
 
 /// Slot selector for `init-token`: exactly one of `--free`, `--slot`, `--token`.
@@ -164,8 +179,9 @@ fn run(command: Command) -> Result<(), String> {
             }
             let key = std::fs::read(&args.key_file)
                 .map_err(|error| format!("cannot read {}: {error}", args.key_file.display()))?;
+            let id = args.id.as_deref().map(parse_hex).transpose()?;
             let label = args.label.clone();
-            admin::import_aes_key(args.target.selector(), args.user_pin, key, args.label)
+            admin::import_aes_key(args.target.selector(), args.user_pin, key, args.label, id)
                 .map_err(|error| error.to_string())?;
             println!("imported AES key {label:?}");
         }

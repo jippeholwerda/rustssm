@@ -94,7 +94,13 @@ pub fn init_token(
 
 /// Imports raw AES key material as a labelled secret key on the selected
 /// token. Requires the user PIN.
-pub fn import_aes_key(selector: SlotSelector, user_pin: String, key: Vec<u8>, label: String) -> Result<(), AdminError> {
+pub fn import_aes_key(
+    selector: SlotSelector,
+    user_pin: String,
+    key: Vec<u8>,
+    label: String,
+    id: Option<Vec<u8>>,
+) -> Result<(), AdminError> {
     if !matches!(key.len(), 16 | 24 | 32) {
         return Err(AdminError::KeyLength(key.len()));
     }
@@ -107,7 +113,8 @@ pub fn import_aes_key(selector: SlotSelector, user_pin: String, key: Vec<u8>, la
         .map_err(AdminError::Hsm)?;
     hsm.login(session, UserType::User, Pin::new(user_pin))
         .map_err(AdminError::Hsm)?;
-    hsm.import_secret_key(session, key, label).map_err(AdminError::Hsm)?;
+    hsm.import_secret_key(session, key, label, id)
+        .map_err(AdminError::Hsm)?;
 
     Ok(())
 }
@@ -282,6 +289,7 @@ mod tests {
             String::from(USER_PIN),
             key.clone(),
             String::from("imported"),
+            Some(b"wrapping-id".to_vec()),
         )
         .unwrap();
 
@@ -299,6 +307,13 @@ mod tests {
         let found = hsm.find_objects_next(session, 10).unwrap();
         hsm.find_objects_final(session).unwrap();
         assert_eq!(found.len(), 1);
+
+        // The CKA_ID given at import is stored and reads back.
+        assert_eq!(
+            hsm.object_attribute(session, found[0].clone(), crate::attribute::AttributeType::Id)
+                .unwrap(),
+            Some(crate::attribute::Attribute::Id(b"wrapping-id".to_vec()))
+        );
 
         let mechanism = Mechanism::AesGcm {
             initialization_vector: vec![0x22; 12],
@@ -326,6 +341,7 @@ mod tests {
                 String::from(USER_PIN),
                 vec![0u8; 20],
                 String::from("bad"),
+                None,
             ),
             Err(super::AdminError::KeyLength(20))
         ));
