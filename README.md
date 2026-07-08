@@ -18,8 +18,9 @@ Implemented (and exercised by the rust-cryptoki test suite):
 - Encrypt/decrypt: `CKM_AES_GCM` (single-part; 96- or 256-bit IV; 128-bit tag)
 - Key wrapping: `CKM_AES_KEY_WRAP_PAD`
 - Object creation/search: `C_CreateObject` (secret keys via `CKA_VALUE`, RSA
-  public keys via raw `CKA_MODULUS`/`CKA_PUBLIC_EXPONENT`; token-managed
-  read-only attributes like `CKA_UNIQUE_ID` in a template are rejected),
+  public keys via raw `CKA_MODULUS`/`CKA_PUBLIC_EXPONENT`, P-256 EC private
+  keys via `CKA_VALUE`; token-managed read-only attributes like `CKA_UNIQUE_ID`
+  in a template are rejected),
   `C_CopyObject` (duplicates key material; template overrides follow the
   set-attribute rules plus the sensitive/extractable one-way guarantees),
   `C_FindObjects*` (matching any combination of stored attributes),
@@ -50,7 +51,7 @@ Error policy: expected failures return `CK_RV` codes; panics indicate broken
 internal invariants and deliberately abort the host process (crash-only) —
 see the module docs in `src/lib.rs`.
 
-Not implemented: `C_CreateObject` for private keys, `CKA_VALUE` readback of
+Not implemented: `C_CreateObject` for RSA private keys, `CKA_VALUE` readback of
 secret keys (treated as sensitive), digests, multipart operations, RSA/AES-CBC
 encryption, EdDSA, and mechanisms not listed above. Unsupported calls return
 `CKR_FUNCTION_NOT_SUPPORTED` / `CKR_MECHANISM_INVALID`. See [TODO.md](TODO.md)

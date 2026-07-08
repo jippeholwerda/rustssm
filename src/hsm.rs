@@ -526,10 +526,13 @@ impl Hsm {
 
     /// Creates an object from a template. Secret keys (`CKO_SECRET_KEY` with
     /// `CKA_VALUE`) are stored like a generated or imported symmetric key.
-    /// Public keys (`CKO_PUBLIC_KEY`) are stored as metadata-only objects so
-    /// their attributes can be read back and searched. Other classes are rejected
-    /// as inconsistent. In every case the template attributes are persisted verbatim
-    /// (minus `CKA_VALUE`, which becomes the key material) for later readback.
+    /// EC private keys (`CKO_PRIVATE_KEY` + `CKK_EC` with `CKA_VALUE` = the
+    /// scalar) are stored like a generated EC private key, so they can be
+    /// found by label and used to sign. Public keys (`CKO_PUBLIC_KEY`) are
+    /// stored as metadata-only objects so their attributes can be read back
+    /// and searched. Other classes are rejected as inconsistent. In every case
+    /// the template attributes are persisted verbatim (minus `CKA_VALUE`, which
+    /// becomes the key material) for later readback.
     pub fn create_object(&self, session_id: SessionId, attributes: Vec<Attribute>) -> Result<ObjectId> {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
@@ -544,14 +547,7 @@ impl Hsm {
 
         match class {
             Some(ObjectClass::SecretKey) => {
-                let value = attributes
-                    .iter()
-                    .find_map(|attr| match attr {
-                        Attribute::Value(bytes) => Some(bytes.clone()),
-                        _ => None,
-                    })
-                    .ok_or(HsmError::TemplateIncomplete)?;
-
+                let value = value_attribute(&attributes)?;
                 if value.is_empty() {
                     return Err(HsmError::AttributeValueInvalid);
                 }
@@ -559,12 +555,29 @@ impl Hsm {
                 let attributes = merge_attributes(attributes, vec![]);
                 session.write_object(&value, attributes).map_err(store_error)
             }
+            Some(ObjectClass::PrivateKey) => {
+                // Only EC private keys are supported; the material is the P-256
+                // scalar, stored exactly as a generated EC private key is.
+                let key_type = attributes.iter().find_map(|attr| match attr {
+                    Attribute::KeyType(key_type) => Some(*key_type),
+                    _ => None,
+                });
+                if key_type != Some(KeyType::Ec) {
+                    return Err(HsmError::TemplateInconsistent);
+                }
+
+                let value = value_attribute(&attributes)?;
+                let material = ec_private_key_material(&value)?;
+
+                let attributes = merge_attributes(attributes, vec![]);
+                session.write_object(&material, attributes).map_err(store_error)
+            }
             Some(ObjectClass::PublicKey) => {
                 let attributes = merge_attributes(attributes, vec![]);
                 let material: Vec<u8> = Vec::new();
                 session.write_object(&material, attributes).map_err(store_error)
             }
-            Some(ObjectClass::PrivateKey) | Some(ObjectClass::Unknown) => Err(HsmError::TemplateInconsistent),
+            Some(ObjectClass::Unknown) => Err(HsmError::TemplateInconsistent),
             None => Err(HsmError::TemplateIncomplete),
         }
     }
@@ -1320,6 +1333,33 @@ fn merge_attributes(mut attributes: Vec<Attribute>, derived: Vec<Attribute>) -> 
     }
 
     attributes
+}
+
+/// Reads the `CKA_VALUE` bytes from a template, which key-object creation
+/// requires.
+fn value_attribute(attributes: &[Attribute]) -> Result<Vec<u8>> {
+    attributes
+        .iter()
+        .find_map(|attr| match attr {
+            Attribute::Value(bytes) => Some(bytes.clone()),
+            _ => None,
+        })
+        .ok_or(HsmError::TemplateIncomplete)
+}
+
+/// Normalizes a `CKA_VALUE` P-256 private scalar to the fixed 32-byte material
+/// a generated EC private key is stored as, validating it is a usable key.
+/// Some encoders strip leading zeros, so a shorter value is left-padded.
+fn ec_private_key_material(value: &[u8]) -> Result<Vec<u8>> {
+    const P256_SCALAR_LEN: usize = 32;
+    if value.is_empty() || value.len() > P256_SCALAR_LEN {
+        return Err(HsmError::AttributeValueInvalid);
+    }
+
+    let mut scalar = vec![0u8; P256_SCALAR_LEN];
+    scalar[P256_SCALAR_LEN - value.len()..].copy_from_slice(value);
+    ecdsa::SigningKey::from_slice(&scalar).map_err(|_| HsmError::AttributeValueInvalid)?;
+    Ok(scalar)
 }
 
 /// The `CKA_EC_POINT` value of a P-256 public key: its uncompressed SEC1

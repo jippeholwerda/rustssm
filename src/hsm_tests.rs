@@ -1233,6 +1233,117 @@ fn generate_key_rejects_token_managed_attributes() {
 }
 
 #[test]
+fn create_ec_private_key_is_importable_and_signs() {
+    use crate::attribute::KeyType;
+    use crate::attribute::ObjectClass;
+    use signature::hazmat::PrehashVerifier;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // A known P-256 key: import its scalar (CKA_VALUE) as an EC private key.
+    let signing_key = p256::ecdsa::SigningKey::from_slice(&[0x42u8; 32]).unwrap();
+    let scalar = signing_key.to_bytes().to_vec();
+    let verifying_key = *signing_key.verifying_key();
+
+    let private = hsm
+        .create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::PrivateKey),
+                Attribute::KeyType(KeyType::Ec),
+                Attribute::Value(scalar),
+                Attribute::Label(String::from("imported_signing_key")),
+                Attribute::Sign(true),
+                Attribute::Token(true),
+            ],
+        )
+        .unwrap();
+
+    // Findable by label (as wallet_provider looks keys up).
+    hsm.find_objects_init(session, vec![Attribute::Label(String::from("imported_signing_key"))])
+        .unwrap();
+    let found = hsm.find_objects_next(session, 10).unwrap();
+    hsm.find_objects_final(session).unwrap();
+    assert_eq!(found, vec![private.clone()]);
+
+    // Usable to sign: the signature verifies under the matching public key.
+    let digest = [0x11u8; 32];
+    hsm.sign_init(session, &Mechanism::Ecdsa, private).unwrap();
+    let signature = hsm.sign(session, &digest).unwrap();
+    let signature = p256::ecdsa::Signature::from_slice(&signature).unwrap();
+    verifying_key.verify_prehash(&digest, &signature).unwrap();
+}
+
+#[test]
+fn create_private_key_rejects_non_ec_and_bad_scalars() {
+    use crate::attribute::KeyType;
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // RSA private key import is not supported.
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::PrivateKey),
+                Attribute::KeyType(KeyType::Rsa),
+                Attribute::Value(vec![1u8; 32]),
+            ],
+        ),
+        Err(HsmError::TemplateInconsistent)
+    ));
+    // Missing key type is treated as inconsistent for a private key.
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::PrivateKey),
+                Attribute::Value(vec![1u8; 32])
+            ],
+        ),
+        Err(HsmError::TemplateInconsistent)
+    ));
+    // EC private key without CKA_VALUE.
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::PrivateKey),
+                Attribute::KeyType(KeyType::Ec)
+            ],
+        ),
+        Err(HsmError::TemplateIncomplete)
+    ));
+    // An all-zero scalar is not a valid P-256 key.
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::PrivateKey),
+                Attribute::KeyType(KeyType::Ec),
+                Attribute::Value(vec![0u8; 32]),
+            ],
+        ),
+        Err(HsmError::AttributeValueInvalid)
+    ));
+    // An over-long scalar is rejected.
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::PrivateKey),
+                Attribute::KeyType(KeyType::Ec),
+                Attribute::Value(vec![1u8; 40]),
+            ],
+        ),
+        Err(HsmError::AttributeValueInvalid)
+    ));
+}
+
+#[test]
 fn create_token_object_in_read_only_session_is_rejected() {
     use crate::attribute::ObjectClass;
 

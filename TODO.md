@@ -15,16 +15,19 @@ attribute rejection unlocked `unique_id`; `C_CopyObject` unlocked
 
 ### Object management (biggest unlock, ~14 tests)
 
-- [~] `C_CreateObject` — secret keys (`CKO_SECRET_KEY` via `CKA_VALUE`) and
+- [~] `C_CreateObject` — secret keys (`CKO_SECRET_KEY` via `CKA_VALUE`),
       RSA public keys (metadata-only, via raw `CKA_MODULUS`/
-      `CKA_PUBLIC_EXPONENT`) are implemented and enforce
-      `CKR_SESSION_READ_ONLY` for token objects in RO sessions; a template
-      carrying a token-managed read-only attribute (`CKA_UNIQUE_ID`,
+      `CKA_PUBLIC_EXPONENT`), and P-256 EC private keys (`CKO_PRIVATE_KEY` +
+      `CKK_EC` with `CKA_VALUE` = the scalar; stored like a generated EC
+      private key, findable by label and usable to sign) are implemented and
+      enforce `CKR_SESSION_READ_ONLY` for token objects in RO sessions; a
+      template carrying a token-managed read-only attribute (`CKA_UNIQUE_ID`,
       `CKA_LOCAL`, `CKA_NEVER_EXTRACTABLE`, `CKA_ALWAYS_SENSITIVE`,
       `CKA_KEY_GEN_MECHANISM`) is rejected with `CKR_ATTRIBUTE_TYPE_INVALID`
       (SoftHSM-compatible; the same guard covers `C_GenerateKey(Pair)` and
       `C_UnwrapKey`). Validated against `p11tool --write --secret-key`,
-      `import_export`, and `unique_id`. Still TODO: private keys.
+      `pkcs11-tool --write-object --type privkey` (import + sign), and the
+      `import_export`/`unique_id` tests. Still TODO: RSA private keys.
       → `aes_cbc_encrypt`, `aes_cbc_pad_encrypt`, `validation`,
       `aes_cmac_sign`, `aes_cmac_verify`, `ekdf_aes_cbc_encrypt_data`
 - [x] Attribute storage and readback — each object persists its full typed
