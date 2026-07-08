@@ -61,6 +61,94 @@ fn generate_secret_key(hsm: &Hsm, session: SessionId, length: u64, label: &str) 
     .unwrap()
 }
 
+// ---- concurrency -------------------------------------------------------
+
+/// Hammers a single shared `Hsm` from many threads, each running full crypto
+/// cycles (keygen → sign/verify or encrypt/decrypt → find → destroy) on its
+/// own sessions with unique labels. Proves the module is safe under
+/// concurrent access: every shared structure is behind a lock or atomic, so
+/// concurrent FFI calls serialize internally rather than racing. Wrong
+/// locking would surface here as a panic (poisoned lock), a wrong result, or
+/// a database error.
+#[test]
+fn concurrent_sessions_from_many_threads_stay_correct() {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    let hsm = hsm_with_token();
+
+    const THREADS: usize = 12;
+    const ITERATIONS: usize = 40;
+    let completed = AtomicUsize::new(0);
+
+    std::thread::scope(|scope| {
+        for thread_id in 0..THREADS {
+            let hsm = &hsm;
+            let completed = &completed;
+            scope.spawn(move || {
+                for iteration in 0..ITERATIONS {
+                    let session = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+                    let tag = format!("t{thread_id}-i{iteration}");
+                    let data = tag.as_bytes();
+
+                    if iteration % 2 == 0 {
+                        // ECDSA sign/verify on a fresh key pair.
+                        let (public, private) = hsm
+                            .generate_key_pair(
+                                session,
+                                &Mechanism::EcKeyPairGen,
+                                vec![Attribute::Label(format!("{tag}-pub"))],
+                                vec![Attribute::Label(format!("{tag}-priv"))],
+                            )
+                            .unwrap();
+
+                        hsm.sign_init(session, &Mechanism::Ecdsa, private.clone()).unwrap();
+                        let signature = hsm.sign(session, data).unwrap();
+                        hsm.verify_init(session, &Mechanism::Ecdsa, public.clone()).unwrap();
+                        hsm.verify(session, data, &signature).unwrap();
+
+                        // The unique label finds exactly this thread's key.
+                        hsm.find_objects_init(session, vec![Attribute::Label(format!("{tag}-priv"))])
+                            .unwrap();
+                        let found = hsm.find_objects_next(session, 10).unwrap();
+                        hsm.find_objects_final(session).unwrap();
+                        assert_eq!(found, vec![private.clone()]);
+
+                        hsm.destroy_object(session, public).unwrap();
+                        hsm.destroy_object(session, private).unwrap();
+                    } else {
+                        // AES-GCM encrypt/decrypt round-trip.
+                        let key = hsm
+                            .generate_key(
+                                session,
+                                &Mechanism::AesKeyGen,
+                                vec![Attribute::ValueLen(32), Attribute::Label(format!("{tag}-aes"))],
+                            )
+                            .unwrap();
+
+                        let mechanism = Mechanism::AesGcm {
+                            initialization_vector: vec![0x24; 12],
+                            additional_authenticated_data: Vec::new(),
+                        };
+                        hsm.encrypt_init(session, &mechanism, key.clone()).unwrap();
+                        let ciphertext = hsm.encrypt(session, data).unwrap();
+                        hsm.decrypt_init(session, &mechanism, key.clone()).unwrap();
+                        let plaintext = hsm.decrypt(session, &ciphertext).unwrap();
+                        assert_eq!(plaintext, data);
+
+                        hsm.destroy_object(session, key).unwrap();
+                    }
+
+                    hsm.close_session(session).unwrap();
+                    completed.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+
+    assert_eq!(completed.load(Ordering::Relaxed), THREADS * ITERATIONS);
+}
+
 // ---- lifecycle ---------------------------------------------------------
 
 #[test]
