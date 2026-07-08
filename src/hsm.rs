@@ -857,6 +857,43 @@ impl Hsm {
         session.set_object_attributes(&object, attributes).map_err(store_error)
     }
 
+    /// Copies an object, applying a template of attribute overrides to the
+    /// copy. Overrides follow the same rules as `C_SetAttributeValue`
+    /// (identity/key-material attributes are read-only, untracked/token-managed
+    /// types are invalid) plus the one-way guarantees that a sensitive key may
+    /// not be made non-sensitive and a non-extractable key may not be made
+    /// extractable. The copy shares the source's key material.
+    pub fn copy_object(&self, session_id: SessionId, source: ObjectId, overrides: Vec<Attribute>) -> Result<ObjectId> {
+        let session_lock = self.get_session(session_id)?;
+        let session = session_lock.read().unwrap();
+
+        let mut attributes = session.read_object_attributes(&source).map_err(|error| match error {
+            SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
+                HsmError::ObjectStore(ObjectStoreError::Database(e))
+            }
+            _ => HsmError::ObjectHandleInvalid,
+        })?;
+
+        reject_unsupported_attributes(&overrides)?;
+
+        for update in overrides {
+            let attribute_type = update.attribute_type().ok_or(HsmError::AttributeTypeInvalid)?;
+            if !attribute_type.is_modifiable() {
+                return Err(HsmError::AttributeReadOnly);
+            }
+            if forbidden_downgrade(&attributes, &update) {
+                return Err(HsmError::AttributeReadOnly);
+            }
+            attributes.retain(|existing| existing.attribute_type() != Some(attribute_type));
+            attributes.push(update);
+        }
+
+        // The copy may become a token object; that still needs a R/W session.
+        self.check_writable(&session, &attributes)?;
+
+        session.copy_object(&source, attributes).map_err(store_error)
+    }
+
     pub fn find_objects_init(&self, session_id: SessionId, attributes: Vec<Attribute>) -> Result<()> {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
@@ -1220,6 +1257,17 @@ fn reject_unsupported_attributes(attributes: &[Attribute]) -> Result<()> {
         return Err(HsmError::AttributeTypeInvalid);
     }
     Ok(())
+}
+
+/// Whether applying `update` to an object carrying `current` attributes would
+/// violate PKCS#11's one-way security guarantees: `CKA_SENSITIVE` may not go
+/// from true to false, and `CKA_EXTRACTABLE` may not go from false to true.
+fn forbidden_downgrade(current: &[Attribute], update: &Attribute) -> bool {
+    match update {
+        Attribute::Sensitive(false) => current.iter().any(|attr| matches!(attr, Attribute::Sensitive(true))),
+        Attribute::Extractable(true) => current.iter().any(|attr| matches!(attr, Attribute::Extractable(false))),
+        _ => false,
+    }
 }
 
 /// Merges token-synthesized/derived attributes into an application template,

@@ -50,6 +50,21 @@ impl From<CK_OBJECT_HANDLE> for ObjectId {
 const OBJECT_SCHEMA: &str = include_str!("../db/migrations/20240107000001_object.sql");
 const TOKEN_SCHEMA: &str = include_str!("../db/migrations/20260706000001_token.sql");
 
+/// Derives the legacy `private` and `label` index columns from an object's
+/// attributes. Matching is done against the full stored attribute list; these
+/// columns exist only so rows remain human-inspectable.
+fn indexed_columns(attributes: &[Attribute]) -> (i64, String) {
+    let private = i64::from(attributes.iter().any(|attr| matches!(attr, Attribute::Private(true))));
+    let label = attributes
+        .iter()
+        .find_map(|attr| match attr {
+            Attribute::Label(label) => Some(label.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| random_string(16));
+    (private, label)
+}
+
 fn apply_schema(connection: &Connection) -> Result<(), ObjectStoreError> {
     connection
         .execute_batch(OBJECT_SCHEMA)
@@ -149,15 +164,7 @@ impl ObjectStore {
     {
         let material = postcard::to_allocvec(&material).map_err(ObjectStoreError::Serialize)?;
 
-        let private = i64::from(attributes.iter().any(|attr| matches!(attr, Attribute::Private(true))));
-        let label = attributes
-            .iter()
-            .find_map(|attr| match attr {
-                Attribute::Label(label) => Some(label.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| random_string(16));
-
+        let (private, label) = indexed_columns(&attributes);
         let record = ObjectRecord { attributes, material };
         let content = postcard::to_allocvec(&record).map_err(ObjectStoreError::Serialize)?;
 
@@ -191,15 +198,7 @@ impl ObjectStore {
     pub fn set_attributes(&self, object_id: &ObjectId, attributes: Vec<Attribute>) -> Result<(), ObjectStoreError> {
         let mut record = self.read_record(object_id)?;
 
-        let private = i64::from(attributes.iter().any(|attr| matches!(attr, Attribute::Private(true))));
-        let label = attributes
-            .iter()
-            .find_map(|attr| match attr {
-                Attribute::Label(label) => Some(label.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| random_string(16));
-
+        let (private, label) = indexed_columns(&attributes);
         record.attributes = attributes;
         let content = postcard::to_allocvec(&record).map_err(ObjectStoreError::Serialize)?;
 
@@ -217,6 +216,26 @@ impl ObjectStore {
         }
 
         Ok(())
+    }
+
+    /// Duplicates an object's key material into a new row under a fresh
+    /// attribute list, returning the new id.
+    pub fn copy(&self, source: &ObjectId, attributes: Vec<Attribute>) -> Result<ObjectId, ObjectStoreError> {
+        let mut record = self.read_record(source)?;
+
+        let (private, label) = indexed_columns(&attributes);
+        record.attributes = attributes;
+        let content = postcard::to_allocvec(&record).map_err(ObjectStoreError::Serialize)?;
+
+        let connection = self.connection.lock().unwrap();
+        connection
+            .execute(
+                "insert into object (content, private, label) values (?1, ?2, ?3)",
+                params![content, private, label],
+            )
+            .map_err(ObjectStoreError::Database)?;
+
+        Ok(ObjectId(connection.last_insert_rowid() as u64))
     }
 
     fn read_record(&self, object_id: &ObjectId) -> Result<ObjectRecord, ObjectStoreError> {

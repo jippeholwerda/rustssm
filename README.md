@@ -20,6 +20,8 @@ Implemented (and exercised by the rust-cryptoki test suite):
 - Object creation/search: `C_CreateObject` (secret keys via `CKA_VALUE`, RSA
   public keys via raw `CKA_MODULUS`/`CKA_PUBLIC_EXPONENT`; token-managed
   read-only attributes like `CKA_UNIQUE_ID` in a template are rejected),
+  `C_CopyObject` (duplicates key material; template overrides follow the
+  set-attribute rules plus the sensitive/extractable one-way guarantees),
   `C_FindObjects*` (matching any combination of stored attributes),
   `C_DestroyObject`
 - Attribute readback: `C_GetAttributeValue` serves the object's stored
@@ -45,11 +47,11 @@ Error policy: expected failures return `CK_RV` codes; panics indicate broken
 internal invariants and deliberately abort the host process (crash-only) —
 see the module docs in `src/lib.rs`.
 
-Not implemented: `C_CreateObject` for private keys, `C_CopyObject`,
-`CKA_VALUE` readback of secret keys (treated as sensitive), digests, multipart
-operations, RSA/AES-CBC encryption, EdDSA, and mechanisms not listed above.
-Unsupported calls return `CKR_FUNCTION_NOT_SUPPORTED` / `CKR_MECHANISM_INVALID`.
-See [TODO.md](TODO.md) for the roadmap.
+Not implemented: `C_CreateObject` for private keys, `CKA_VALUE` readback of
+secret keys (treated as sensitive), digests, multipart operations, RSA/AES-CBC
+encryption, EdDSA, and mechanisms not listed above. Unsupported calls return
+`CKR_FUNCTION_NOT_SUPPORTED` / `CKR_MECHANISM_INVALID`. See [TODO.md](TODO.md)
+for the roadmap.
 
 ## Provisioning a token
 

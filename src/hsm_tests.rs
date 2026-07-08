@@ -1409,6 +1409,99 @@ fn set_object_attributes_on_token_object_needs_read_write_session() {
 }
 
 #[test]
+fn copy_object_duplicates_material_and_applies_overrides() {
+    use crate::attribute::KeyType;
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let source = hsm
+        .generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![
+                Attribute::Class(ObjectClass::SecretKey),
+                Attribute::KeyType(KeyType::Aes),
+                Attribute::Sensitive(true),
+                Attribute::Extractable(false),
+                Attribute::ValueLen(16),
+                Attribute::Label(String::from("original")),
+            ],
+        )
+        .unwrap();
+
+    // Copy with a label override: new handle, same key bytes, new label.
+    let copy = hsm
+        .copy_object(session, source.clone(), vec![Attribute::Label(String::from("copy"))])
+        .unwrap();
+    assert_ne!(copy, source);
+
+    let source_material: Vec<u8> = hsm.object_store().unwrap().read(&source).unwrap();
+    let copy_material: Vec<u8> = hsm.object_store().unwrap().read(&copy).unwrap();
+    assert_eq!(source_material, copy_material);
+
+    assert_eq!(
+        hsm.object_attribute(session, copy.clone(), AttributeType::Label)
+            .unwrap(),
+        Some(Attribute::Label(String::from("copy")))
+    );
+    // Attributes not overridden are carried over from the source.
+    assert_eq!(
+        hsm.object_attribute(session, copy, AttributeType::KeyType).unwrap(),
+        Some(Attribute::KeyType(KeyType::Aes))
+    );
+
+    // Copying with no template succeeds and keeps the original label.
+    let plain_copy = hsm.copy_object(session, source.clone(), vec![]).unwrap();
+    assert_eq!(
+        hsm.object_attribute(session, plain_copy, AttributeType::Label).unwrap(),
+        Some(Attribute::Label(String::from("original")))
+    );
+}
+
+#[test]
+fn copy_object_rejects_security_downgrades_and_read_only_overrides() {
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let source = hsm
+        .generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![
+                Attribute::Sensitive(true),
+                Attribute::Extractable(false),
+                Attribute::ValueLen(16),
+            ],
+        )
+        .unwrap();
+
+    // A non-extractable key may not be copied into an extractable one.
+    assert!(matches!(
+        hsm.copy_object(session, source.clone(), vec![Attribute::Extractable(true)]),
+        Err(HsmError::AttributeReadOnly)
+    ));
+    // A sensitive key may not be copied into a non-sensitive one.
+    assert!(matches!(
+        hsm.copy_object(session, source.clone(), vec![Attribute::Sensitive(false)]),
+        Err(HsmError::AttributeReadOnly)
+    ));
+    // Identity/key-material attributes are read-only in a copy template.
+    assert!(matches!(
+        hsm.copy_object(session, source.clone(), vec![Attribute::Class(ObjectClass::PublicKey)]),
+        Err(HsmError::AttributeReadOnly)
+    ));
+    // Token-managed attributes are invalid.
+    assert!(matches!(
+        hsm.copy_object(session, source, vec![Attribute::Unsupported]),
+        Err(HsmError::AttributeTypeInvalid)
+    ));
+}
+
+#[test]
 fn operations_on_invalid_session_are_rejected() {
     let hsm = hsm_with_token();
     let bogus = SessionId(4242);

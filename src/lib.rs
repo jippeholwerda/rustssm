@@ -836,6 +836,40 @@ pub unsafe extern "C" fn C_CreateObject(
 /// # Safety
 ///
 /// Dereferencing
+pub unsafe extern "C" fn C_CopyObject(
+    hSession: raw::CK_SESSION_HANDLE,
+    hObject: raw::CK_OBJECT_HANDLE,
+    pTemplate: raw::CK_ATTRIBUTE_PTR,
+    ulCount: raw::CK_ULONG,
+    phNewObject: raw::CK_OBJECT_HANDLE_PTR,
+) -> raw::CK_RV {
+    ck("C_CopyObject", || {
+        debug!("C_CopyObject");
+
+        if phNewObject.is_null() {
+            return Err(raw::CKR_ARGUMENTS_BAD);
+        }
+        if pTemplate.is_null() && ulCount > 0 {
+            return Err(raw::CKR_ARGUMENTS_BAD);
+        }
+
+        let attributes = unsafe { read_attributes(pTemplate, ulCount) };
+        debug!("C_CopyObject attributes: {:?}", &attributes);
+
+        let object_id = HSM.copy_object(SessionId(hSession), hObject.into(), attributes).ck()?;
+
+        unsafe {
+            *phNewObject = object_id.into();
+        }
+
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// Dereferencing
 pub unsafe extern "C" fn C_SetAttributeValue(
     hSession: raw::CK_SESSION_HANDLE,
     hObject: raw::CK_OBJECT_HANDLE,
@@ -1283,7 +1317,7 @@ static FUNCTION_LIST: raw::CK_FUNCTION_LIST = raw::CK_FUNCTION_LIST {
     C_Login: Some(C_Login),
     C_Logout: Some(C_Logout),
     C_CreateObject: Some(C_CreateObject),
-    C_CopyObject: None,
+    C_CopyObject: Some(C_CopyObject),
     C_DestroyObject: Some(C_DestroyObject),
     C_GetObjectSize: None,
     C_GetAttributeValue: Some(C_GetAttributeValue),

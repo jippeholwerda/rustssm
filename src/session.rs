@@ -97,6 +97,10 @@ impl Session {
             .map_err(SessionError::ObjectStore)
     }
 
+    pub fn copy_object(&self, source: &ObjectId, attributes: Vec<Attribute>) -> Result<ObjectId, SessionError> {
+        self.objects.copy(source, attributes).map_err(SessionError::ObjectStore)
+    }
+
     pub fn object_exists(&self, object_id: &ObjectId) -> bool {
         self.objects.read_raw(object_id).is_ok()
     }

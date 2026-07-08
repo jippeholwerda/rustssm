@@ -1,15 +1,15 @@
 # TODO
 
 Current baseline (2026-07-08): rust-cryptoki `basic.rs` suite scores
-**39 passed / 37 failed / 2 ignored** against rustssm (with
+**40 passed / 36 failed / 2 ignored** against rustssm (with
 `TEST_PRETEND_LIBRARY=softhsm`). All failures are missing functionality, not
 bugs; each item below names the tests it unlocks. (`CKM_AES_KEY_GEN` unlocked
 `session_find_objects` and `session_objecthandle_iterator`; attribute
 storage/readback then unlocked `get_attributes_test`,
 `generate_generic_secret_key`, `import_export`, and `aes_key_attributes_test`;
 `C_SetAttributeValue` unlocked `update_attributes_key`; create-time read-only
-attribute rejection unlocked `unique_id`; from the 2026-07-02 baseline of
-31/45.)
+attribute rejection unlocked `unique_id`; `C_CopyObject` unlocked
+`session_copy_object`; from the 2026-07-02 baseline of 31/45.)
 
 ## 1. Make every rust-cryptoki test pass
 
@@ -38,7 +38,11 @@ attribute rejection unlocked `unique_id`; from the 2026-07-02 baseline of
       `session_objecthandle_iterator`, `unique_id`. Remaining readback gap:
       `get_attribute_info_test` (needs `CKA_MODULUS` on a generated private key
       + sensitivity reporting).
-- [ ] `C_CopyObject` → `session_copy_object`
+- [x] `C_CopyObject` → `session_copy_object`. Duplicates the source's key
+      material into a new object; the template overrides attributes under the
+      `C_SetAttributeValue` rules (identity/key-material read-only,
+      untracked/token-managed invalid) plus the one-way guarantees that
+      `CKA_SENSITIVE` may not go true→false and `CKA_EXTRACTABLE` false→true.
 - [x] `C_SetAttributeValue` → `update_attributes_key`, `unique_id`. Updates
       modifiable attributes (usage/policy flags, label, id); rejects
       identity/key-material attributes as `CKR_ATTRIBUTE_READ_ONLY` and
