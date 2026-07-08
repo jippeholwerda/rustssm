@@ -13,8 +13,8 @@ use rustssm::admin::SlotSelector;
 #[derive(Parser)]
 #[command(name = "rustssm-util", about = "Provision rustssm tokens (softhsm2-util-style)")]
 struct Cli {
-    /// SQLite store path (default: $DATABASE_URL, else rustssm.db). Must match
-    /// the path the loaded module uses.
+    /// SQLite store path (default: $RUSTSSM_DATABASE_URL, else rustssm.db).
+    /// Must match the path the loaded module uses.
     #[arg(long, global = true)]
     database: Option<String>,
 
@@ -146,7 +146,7 @@ fn main() {
     let cli = Cli::parse();
 
     if let Some(database) = cli.database {
-        std::env::set_var("DATABASE_URL", database);
+        std::env::set_var("RUSTSSM_DATABASE_URL", database);
     }
 
     if let Err(message) = run(cli.command) {

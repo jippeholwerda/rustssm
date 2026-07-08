@@ -214,7 +214,7 @@ TODOs, roughly in dependency order:
       PIN matches the toml (`rustssm-util --database <db> init-token --free
       --label nl-wallet-test --so-pin <sopin> --user-pin 12345678`), then run
       with the module pointed at the same store:
-      `DATABASE_URL=<db> cargo test -p hsm --features hsm_test --test hsm`.
+      `RUSTSSM_DATABASE_URL=<db> cargo test -p hsm --features hsm_test --test hsm`.
       **All 5 cases pass** (`sign_sha256_hmac`, `sign_ecdsa`, `encrypt_decrypt`,
       `encrypt_decrypt_verifying_key`, `wrap_key_and_sign`) — exercises
       nl-wallet's `Pkcs11Hsm` + the r2d2-cryptoki session pool end-to-end.

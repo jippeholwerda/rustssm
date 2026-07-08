@@ -100,10 +100,12 @@ pub struct ObjectStore {
 
 impl ObjectStore {
     pub fn new() -> Result<Self, ObjectStoreError> {
-        // DATABASE_URL is accepted both as a plain path and as a
-        // sqlite://path?params URL (the format the previous sqlx-based store
-        // used).
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| String::from("rustssm.db"));
+        // The store path comes from RUSTSSM_DATABASE_URL — deliberately
+        // namespaced so it can't clash with a host process's own
+        // `DATABASE_URL` (e.g. its application database). It is accepted both
+        // as a plain path and as a sqlite://path?params URL (the format the
+        // previous sqlx-based store used).
+        let url = std::env::var("RUSTSSM_DATABASE_URL").unwrap_or_else(|_| String::from("rustssm.db"));
         let path = url.strip_prefix("sqlite://").unwrap_or(&url);
         let path = path.split('?').next().unwrap_or(path);
 

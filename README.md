@@ -36,8 +36,9 @@ Implemented (and exercised by the rust-cryptoki test suite):
 
 Token objects and token state (label, initialized flag, and salted-hashed
 SO/user PINs) are persisted in a SQLite database (`rustssm.db` in the working
-directory; override with `DATABASE_URL`, either a plain path or a
-`sqlite://path` URL), so a restarted module keeps its tokens and accepts the
+directory; override with `RUSTSSM_DATABASE_URL`, either a plain path or a
+`sqlite://path` URL — namespaced so it can't clash with a host process's own
+`DATABASE_URL`), so a restarted module keeps its tokens and accepts the
 same PINs. Session objects (`CKA_TOKEN` false) are destroyed when the session
 that created them closes, and any left behind by a crash are purged on the
 next `C_Initialize`.
@@ -80,7 +81,7 @@ rustssm-util --database /path/to/rustssm.db import \
 ```
 
 `init-token` selects a slot with one of `--free`, `--slot <N>` or
-`--token <LABEL>`. The `--database` path (or `DATABASE_URL`) must match the one
+`--token <LABEL>`. The `--database` path (or `RUSTSSM_DATABASE_URL`) must match the one
 the loaded module uses. Initializing a token destroys any objects already in
 the store, and — as with the PKCS#11 API — PINs are stored as salted hashes,
 never in plaintext.

@@ -80,7 +80,7 @@ fn pkcs11_end_to_end() {
     // Isolate the object store in a throwaway database.
     let db = std::env::temp_dir().join(format!("rustssm-it-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&db);
-    std::env::set_var("DATABASE_URL", &db);
+    std::env::set_var("RUSTSSM_DATABASE_URL", &db);
 
     let library = unsafe { libloading::Library::new(module_path()) }.expect("load module");
     let get_list: libloading::Symbol<CkGetFunctionList> =

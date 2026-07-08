@@ -170,11 +170,12 @@ mod tests {
     const USER_PIN: &str = "user-pin-123456";
 
     /// Serializes the admin tests: they all steer the process-global
-    /// `DATABASE_URL`, so only one may run at a time.
+    /// `RUSTSSM_DATABASE_URL`, so only one may run at a time.
     static DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Points `DATABASE_URL` at a unique throwaway file for the duration of a
-    /// test, holding [`DB_LOCK`] so concurrent admin tests don't collide.
+    /// Points `RUSTSSM_DATABASE_URL` at a unique throwaway file for the
+    /// duration of a test, holding [`DB_LOCK`] so concurrent admin tests
+    /// don't collide.
     struct TempDb {
         path: std::path::PathBuf,
         _guard: std::sync::MutexGuard<'static, ()>,
@@ -186,7 +187,7 @@ mod tests {
             let path = std::env::temp_dir().join(format!("rustssm-admin-{tag}-{}.db", std::process::id()));
             let db = TempDb { path, _guard: guard };
             db.remove();
-            std::env::set_var("DATABASE_URL", &db.path);
+            std::env::set_var("RUSTSSM_DATABASE_URL", &db.path);
             db
         }
 
