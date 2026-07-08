@@ -1108,6 +1108,43 @@ fn create_object_rejects_bad_templates() {
 }
 
 #[test]
+fn create_object_rejects_token_managed_attributes() {
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // A read-only, token-managed attribute (e.g. CKA_UNIQUE_ID) in the
+    // template is rejected rather than silently ignored.
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::SecretKey),
+                Attribute::Value(vec![0u8; 32]),
+                Attribute::Unsupported,
+            ],
+        ),
+        Err(HsmError::AttributeTypeInvalid)
+    ));
+}
+
+#[test]
+fn generate_key_rejects_token_managed_attributes() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    assert!(matches!(
+        hsm.generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![Attribute::ValueLen(32), Attribute::Unsupported],
+        ),
+        Err(HsmError::AttributeTypeInvalid)
+    ));
+}
+
+#[test]
 fn create_token_object_in_read_only_session_is_rejected() {
     use crate::attribute::ObjectClass;
 

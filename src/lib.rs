@@ -1450,6 +1450,15 @@ pub unsafe fn read_attributes(template: raw::CK_ATTRIBUTE_PTR, count: raw::CK_UL
                         };
                         Attribute::KeyType(key_type)
                     }
+
+                    // Token-managed, read-only attributes: a client must not
+                    // set these. Rejected (not ignored) when in a template.
+                    raw::CKA_UNIQUE_ID
+                    | raw::CKA_LOCAL
+                    | raw::CKA_NEVER_EXTRACTABLE
+                    | raw::CKA_ALWAYS_SENSITIVE
+                    | raw::CKA_KEY_GEN_MECHANISM => Attribute::Unsupported,
+
                     _ => {
                         debug!("unknown attribute: {}", attr.type_);
                         Attribute::Unknown
@@ -1562,7 +1571,7 @@ fn encode_attribute(attribute: &Attribute) -> Vec<u8> {
         | Attribute::EcParams(value)
         | Attribute::EcPoint(value) => value.clone(),
 
-        Attribute::Unknown => Vec::new(),
+        Attribute::Unknown | Attribute::Unsupported => Vec::new(),
     }
 }
 

@@ -513,6 +513,7 @@ impl Hsm {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
+        reject_unsupported_attributes(&attributes)?;
         self.check_writable(&session, &attributes)?;
 
         let class = attributes.iter().find_map(|attr| match attr {
@@ -573,6 +574,7 @@ impl Hsm {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
+        reject_unsupported_attributes(&attributes)?;
         self.check_writable(&session, &attributes)?;
 
         let (key_len, key_type) = match mechanism {
@@ -613,6 +615,9 @@ impl Hsm {
         private_key_attributes: Vec<Attribute>,
     ) -> Result<(ObjectId, ObjectId)> {
         let session_lock = self.get_session(session_id)?;
+
+        reject_unsupported_attributes(&public_key_attributes)?;
+        reject_unsupported_attributes(&private_key_attributes)?;
 
         {
             let session = session_lock.read().unwrap();
@@ -744,6 +749,8 @@ impl Hsm {
     ) -> Result<ObjectId> {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
+
+        reject_unsupported_attributes(&attributes)?;
 
         match mechanism {
             Mechanism::AesKeyWrapPad => {
@@ -1203,13 +1210,25 @@ fn store_error(error: SessionError) -> HsmError {
 /// `CKA_EC_PARAMS` for every EC key this token produces.
 const SECP256R1_EC_PARAMS: [u8; 10] = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 
+/// Rejects a creation/generation template that carries a token-managed,
+/// read-only attribute (`CKA_UNIQUE_ID` and friends, parsed as
+/// [`Attribute::Unsupported`]). Following SoftHSM, rustssm does not support
+/// these attributes, so supplying one is a type error rather than a silent
+/// no-op.
+fn reject_unsupported_attributes(attributes: &[Attribute]) -> Result<()> {
+    if attributes.iter().any(|attr| matches!(attr, Attribute::Unsupported)) {
+        return Err(HsmError::AttributeTypeInvalid);
+    }
+    Ok(())
+}
+
 /// Merges token-synthesized/derived attributes into an application template,
 /// producing the attribute list persisted with the object. `CKA_VALUE` (the
 /// key material) and unrecognized attributes are dropped, and each derived
 /// attribute is added only when the template does not already carry that type
 /// so the application's choice wins.
 fn merge_attributes(mut attributes: Vec<Attribute>, derived: Vec<Attribute>) -> Vec<Attribute> {
-    attributes.retain(|attr| !matches!(attr, Attribute::Value(_) | Attribute::Unknown));
+    attributes.retain(|attr| !matches!(attr, Attribute::Value(_) | Attribute::Unknown | Attribute::Unsupported));
 
     for attribute in derived {
         let already_present = attribute.attribute_type().is_some_and(|type_| {

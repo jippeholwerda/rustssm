@@ -1,14 +1,15 @@
 # TODO
 
-Current baseline (2026-07-07): rust-cryptoki `basic.rs` suite scores
-**38 passed / 38 failed / 2 ignored** against rustssm (with
+Current baseline (2026-07-08): rust-cryptoki `basic.rs` suite scores
+**39 passed / 37 failed / 2 ignored** against rustssm (with
 `TEST_PRETEND_LIBRARY=softhsm`). All failures are missing functionality, not
 bugs; each item below names the tests it unlocks. (`CKM_AES_KEY_GEN` unlocked
 `session_find_objects` and `session_objecthandle_iterator`; attribute
 storage/readback then unlocked `get_attributes_test`,
 `generate_generic_secret_key`, `import_export`, and `aes_key_attributes_test`;
-`C_SetAttributeValue` unlocked `update_attributes_key`; from the 2026-07-02
-baseline of 31/45.)
+`C_SetAttributeValue` unlocked `update_attributes_key`; create-time read-only
+attribute rejection unlocked `unique_id`; from the 2026-07-02 baseline of
+31/45.)
 
 ## 1. Make every rust-cryptoki test pass
 
@@ -17,12 +18,14 @@ baseline of 31/45.)
 - [~] `C_CreateObject` — secret keys (`CKO_SECRET_KEY` via `CKA_VALUE`) and
       RSA public keys (metadata-only, via raw `CKA_MODULUS`/
       `CKA_PUBLIC_EXPONENT`) are implemented and enforce
-      `CKR_SESSION_READ_ONLY` for token objects in RO sessions; validated
-      against `p11tool --write --secret-key` and `import_export`. Still TODO:
-      private keys, and rejecting read-only attributes (`CKA_UNIQUE_ID`,
-      validation flags) with `CKR_ATTRIBUTE_TYPE_INVALID` (needs
-      `C_SetAttributeValue` for the full `unique_id` test).
-      → `aes_cbc_encrypt`, `aes_cbc_pad_encrypt`, `unique_id`, `validation`,
+      `CKR_SESSION_READ_ONLY` for token objects in RO sessions; a template
+      carrying a token-managed read-only attribute (`CKA_UNIQUE_ID`,
+      `CKA_LOCAL`, `CKA_NEVER_EXTRACTABLE`, `CKA_ALWAYS_SENSITIVE`,
+      `CKA_KEY_GEN_MECHANISM`) is rejected with `CKR_ATTRIBUTE_TYPE_INVALID`
+      (SoftHSM-compatible; the same guard covers `C_GenerateKey(Pair)` and
+      `C_UnwrapKey`). Validated against `p11tool --write --secret-key`,
+      `import_export`, and `unique_id`. Still TODO: private keys.
+      → `aes_cbc_encrypt`, `aes_cbc_pad_encrypt`, `validation`,
       `aes_cmac_sign`, `aes_cmac_verify`, `ekdf_aes_cbc_encrypt_data`
 - [x] Attribute storage and readback — each object persists its full typed
       attribute list (the template merged with token-synthesized class/key
@@ -32,17 +35,15 @@ baseline of 31/45.)
       report present-but-empty. `CKA_VALUE` of a secret key stays unavailable
       (sensitive). → `get_attributes_test`, `aes_key_attributes_test`,
       `generate_generic_secret_key`, `import_export`, `session_find_objects`,
-      `session_objecthandle_iterator`. Remaining readback gaps: `CKA_UNIQUE_ID`
-      (`unique_id`), `get_attribute_info_test` (needs `CKA_MODULUS` on a
-      generated private key + sensitivity reporting).
+      `session_objecthandle_iterator`, `unique_id`. Remaining readback gap:
+      `get_attribute_info_test` (needs `CKA_MODULUS` on a generated private key
+      + sensitivity reporting).
 - [ ] `C_CopyObject` → `session_copy_object`
-- [x] `C_SetAttributeValue` → `update_attributes_key`. Updates modifiable
-      attributes (usage/policy flags, label, id); rejects identity/key-material
-      attributes as `CKR_ATTRIBUTE_READ_ONLY` and untracked types as
-      `CKR_ATTRIBUTE_TYPE_INVALID`; token objects require a R/W session. The
-      full `unique_id` test additionally needs `C_CreateObject` to reject a
-      read-only `CKA_UNIQUE_ID` in its template (untracked attributes are
-      currently dropped rather than rejected at create time).
+- [x] `C_SetAttributeValue` → `update_attributes_key`, `unique_id`. Updates
+      modifiable attributes (usage/policy flags, label, id); rejects
+      identity/key-material attributes as `CKR_ATTRIBUTE_READ_ONLY` and
+      untracked/token-managed types as `CKR_ATTRIBUTE_TYPE_INVALID`; token
+      objects require a R/W session.
 
 ### Key generation mechanisms
 

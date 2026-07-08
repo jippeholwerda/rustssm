@@ -35,7 +35,15 @@ pub enum Attribute {
     EcParams(Vec<u8>),
     EcPoint(Vec<u8>),
 
+    /// A recognized attribute type that rustssm does not model and silently
+    /// ignores when it appears in a template (e.g. `CKA_MODIFIABLE`).
     Unknown,
+
+    /// A token-managed, read-only attribute (e.g. `CKA_UNIQUE_ID`) that a
+    /// client must not supply. Following SoftHSM, rustssm does not support
+    /// these, so their presence in a creation/generation template is rejected
+    /// rather than ignored.
+    Unsupported,
 }
 
 impl Attribute {
@@ -65,7 +73,7 @@ impl Attribute {
             Attribute::PublicExponent(_) => AttributeType::PublicExponent,
             Attribute::EcParams(_) => AttributeType::EcParams,
             Attribute::EcPoint(_) => AttributeType::EcPoint,
-            Attribute::Unknown => return None,
+            Attribute::Unknown | Attribute::Unsupported => return None,
         })
     }
 }

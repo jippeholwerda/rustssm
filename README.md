@@ -18,8 +18,10 @@ Implemented (and exercised by the rust-cryptoki test suite):
 - Encrypt/decrypt: `CKM_AES_GCM` (single-part; 96- or 256-bit IV; 128-bit tag)
 - Key wrapping: `CKM_AES_KEY_WRAP_PAD`
 - Object creation/search: `C_CreateObject` (secret keys via `CKA_VALUE`, RSA
-  public keys via raw `CKA_MODULUS`/`CKA_PUBLIC_EXPONENT`), `C_FindObjects*`
-  (matching any combination of stored attributes), `C_DestroyObject`
+  public keys via raw `CKA_MODULUS`/`CKA_PUBLIC_EXPONENT`; token-managed
+  read-only attributes like `CKA_UNIQUE_ID` in a template are rejected),
+  `C_FindObjects*` (matching any combination of stored attributes),
+  `C_DestroyObject`
 - Attribute readback: `C_GetAttributeValue` serves the object's stored
   template plus token-synthesized/derived attributes (`CKA_CLASS`,
   `CKA_KEY_TYPE`, `CKA_MODULUS`, `CKA_MODULUS_BITS`, `CKA_PUBLIC_EXPONENT`,
