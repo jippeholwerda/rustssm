@@ -25,6 +25,9 @@ Implemented (and exercised by the rust-cryptoki test suite):
   `CKA_KEY_TYPE`, `CKA_MODULUS`, `CKA_MODULUS_BITS`, `CKA_PUBLIC_EXPONENT`,
   `CKA_EC_POINT`, `CKA_EC_PARAMS`, `CKA_ID`, `CKA_LABEL`, boolean usage flags,
   …)
+- Attribute modification: `C_SetAttributeValue` updates modifiable
+  attributes (usage/policy flags, label, id); identity and key-material
+  attributes are rejected as read-only, unknown types as invalid
 - `C_GenerateRandom` / `C_SeedRandom`
 
 Objects and token state (label, initialized flag, and salted-hashed SO/user
@@ -41,11 +44,10 @@ internal invariants and deliberately abort the host process (crash-only) —
 see the module docs in `src/lib.rs`.
 
 Not implemented: `C_CreateObject` for private keys, `C_CopyObject`,
-`C_SetAttributeValue`, `CKA_VALUE` readback of secret keys (treated as
-sensitive), digests, multipart operations, RSA/AES-CBC encryption, EdDSA, and
-mechanisms not listed above. Unsupported calls return
-`CKR_FUNCTION_NOT_SUPPORTED` / `CKR_MECHANISM_INVALID`. See [TODO.md](TODO.md)
-for the roadmap.
+`CKA_VALUE` readback of secret keys (treated as sensitive), digests, multipart
+operations, RSA/AES-CBC encryption, EdDSA, and mechanisms not listed above.
+Unsupported calls return `CKR_FUNCTION_NOT_SUPPORTED` / `CKR_MECHANISM_INVALID`.
+See [TODO.md](TODO.md) for the roadmap.
 
 ## Provisioning a token
 

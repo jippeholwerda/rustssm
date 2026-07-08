@@ -98,6 +98,31 @@ pub enum AttributeType {
     EcPoint,
 }
 
+impl AttributeType {
+    /// Whether `C_SetAttributeValue` may change this attribute. Identity and
+    /// key-material attributes (class, key type, modulus, EC point, …) are
+    /// fixed at creation; only usage/policy flags and the label/id can be
+    /// updated.
+    pub fn is_modifiable(&self) -> bool {
+        matches!(
+            self,
+            AttributeType::Token
+                | AttributeType::Private
+                | AttributeType::Sensitive
+                | AttributeType::Extractable
+                | AttributeType::Derive
+                | AttributeType::Sign
+                | AttributeType::Verify
+                | AttributeType::Encrypt
+                | AttributeType::Decrypt
+                | AttributeType::Wrap
+                | AttributeType::Unwrap
+                | AttributeType::Label
+                | AttributeType::Id
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObjectClass {
     PublicKey,

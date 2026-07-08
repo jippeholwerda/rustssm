@@ -1,13 +1,14 @@
 # TODO
 
 Current baseline (2026-07-07): rust-cryptoki `basic.rs` suite scores
-**37 passed / 39 failed / 2 ignored** against rustssm (with
+**38 passed / 38 failed / 2 ignored** against rustssm (with
 `TEST_PRETEND_LIBRARY=softhsm`). All failures are missing functionality, not
 bugs; each item below names the tests it unlocks. (`CKM_AES_KEY_GEN` unlocked
 `session_find_objects` and `session_objecthandle_iterator`; attribute
 storage/readback then unlocked `get_attributes_test`,
-`generate_generic_secret_key`, `import_export`, and `aes_key_attributes_test`,
-from the 2026-07-02 baseline of 31/45.)
+`generate_generic_secret_key`, `import_export`, and `aes_key_attributes_test`;
+`C_SetAttributeValue` unlocked `update_attributes_key`; from the 2026-07-02
+baseline of 31/45.)
 
 ## 1. Make every rust-cryptoki test pass
 
@@ -35,7 +36,13 @@ from the 2026-07-02 baseline of 31/45.)
       (`unique_id`), `get_attribute_info_test` (needs `CKA_MODULUS` on a
       generated private key + sensitivity reporting).
 - [ ] `C_CopyObject` → `session_copy_object`
-- [ ] `C_SetAttributeValue` → `update_attributes_key`, `unique_id`
+- [x] `C_SetAttributeValue` → `update_attributes_key`. Updates modifiable
+      attributes (usage/policy flags, label, id); rejects identity/key-material
+      attributes as `CKR_ATTRIBUTE_READ_ONLY` and untracked types as
+      `CKR_ATTRIBUTE_TYPE_INVALID`; token objects require a R/W session. The
+      full `unique_id` test additionally needs `C_CreateObject` to reject a
+      read-only `CKA_UNIQUE_ID` in its template (untracked attributes are
+      currently dropped rather than rejected at create time).
 
 ### Key generation mechanisms
 
@@ -203,3 +210,18 @@ Critical path for nl-wallet: AES key generation → GCM decrypt → arbitrary
 GCM IV length → persistent token state. Critical path for the rust-cryptoki
 suite: `C_CreateObject` + attribute storage → AES key generation → digests →
 multipart operations.
+
+## 3. Internals / tech debt
+
+- [ ] **Switch persisted object records from postcard to CBOR** (ciborium).
+      postcard encodes enums by discriminant index and struct fields
+      positionally, with no names or framing — so reordering/inserting a
+      variant in the now-persisted `Attribute`/`ObjectClass`/`KeyType` enums (or
+      adding an `ObjectRecord` field) silently misreads previously-stored
+      objects. postcard's niche (embedded / `no_std` / serial wire) does not
+      match a desktop HSM persisting into local SQLite; CBOR is self-describing
+      and tolerant of schema evolution. Scope is isolated to the object BLOB
+      (token state already lives in typed SQL columns). While doing it, collapse
+      the double serialization (key material is postcard'd, then the wrapping
+      `ObjectRecord` is postcard'd again). Interim mitigation if deferred: a
+      stored format-version guard plus an append-only rule for those enums.

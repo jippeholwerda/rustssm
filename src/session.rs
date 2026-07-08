@@ -91,6 +91,12 @@ impl Session {
             .map_err(SessionError::ObjectStore)
     }
 
+    pub fn set_object_attributes(&self, object_id: &ObjectId, attributes: Vec<Attribute>) -> Result<(), SessionError> {
+        self.objects
+            .set_attributes(object_id, attributes)
+            .map_err(SessionError::ObjectStore)
+    }
+
     pub fn object_exists(&self, object_id: &ObjectId) -> bool {
         self.objects.read_raw(object_id).is_ok()
     }

@@ -100,6 +100,7 @@ fn rv_from(error: HsmError) -> raw::CK_RV {
         HsmError::TemplateInconsistent => raw::CKR_TEMPLATE_INCONSISTENT,
         HsmError::AttributeValueInvalid => raw::CKR_ATTRIBUTE_VALUE_INVALID,
         HsmError::AttributeTypeInvalid => raw::CKR_ATTRIBUTE_TYPE_INVALID,
+        HsmError::AttributeReadOnly => raw::CKR_ATTRIBUTE_READ_ONLY,
         HsmError::KeyHandleInvalid => raw::CKR_KEY_HANDLE_INVALID,
         HsmError::KeySizeRange => raw::CKR_KEY_SIZE_RANGE,
         HsmError::WrappingKeyHandleInvalid => raw::CKR_WRAPPING_KEY_HANDLE_INVALID,
@@ -832,6 +833,33 @@ pub unsafe extern "C" fn C_CreateObject(
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// Dereferencing
+pub unsafe extern "C" fn C_SetAttributeValue(
+    hSession: raw::CK_SESSION_HANDLE,
+    hObject: raw::CK_OBJECT_HANDLE,
+    pTemplate: raw::CK_ATTRIBUTE_PTR,
+    ulCount: raw::CK_ULONG,
+) -> raw::CK_RV {
+    ck("C_SetAttributeValue", || {
+        debug!("C_SetAttributeValue");
+
+        if pTemplate.is_null() && ulCount > 0 {
+            return Err(raw::CKR_ARGUMENTS_BAD);
+        }
+
+        let attributes = unsafe { read_attributes(pTemplate, ulCount) };
+        debug!("C_SetAttributeValue attributes: {:?}", &attributes);
+
+        // An unrecognized (untracked) attribute type parses as `Unknown`;
+        // the domain rejects it as `CKR_ATTRIBUTE_TYPE_INVALID`.
+        HSM.set_object_attributes(SessionId(hSession), hObject.into(), attributes)
+            .ck()
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn C_DestroyObject(hSession: raw::CK_SESSION_HANDLE, hObject: raw::CK_OBJECT_HANDLE) -> raw::CK_RV {
     ck("C_DestroyObject", || {
         debug!("C_DestroyObject");
@@ -1259,7 +1287,7 @@ static FUNCTION_LIST: raw::CK_FUNCTION_LIST = raw::CK_FUNCTION_LIST {
     C_DestroyObject: Some(C_DestroyObject),
     C_GetObjectSize: None,
     C_GetAttributeValue: Some(C_GetAttributeValue),
-    C_SetAttributeValue: None,
+    C_SetAttributeValue: Some(C_SetAttributeValue),
     C_FindObjectsInit: Some(C_FindObjectsInit),
     C_FindObjects: Some(C_FindObjects),
     C_FindObjectsFinal: Some(C_FindObjectsFinal),

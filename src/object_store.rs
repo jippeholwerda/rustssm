@@ -186,6 +186,39 @@ impl ObjectStore {
         Ok(self.read_record(object_id)?.attributes)
     }
 
+    /// Replaces an object's stored attribute list, preserving its key
+    /// material.
+    pub fn set_attributes(&self, object_id: &ObjectId, attributes: Vec<Attribute>) -> Result<(), ObjectStoreError> {
+        let mut record = self.read_record(object_id)?;
+
+        let private = i64::from(attributes.iter().any(|attr| matches!(attr, Attribute::Private(true))));
+        let label = attributes
+            .iter()
+            .find_map(|attr| match attr {
+                Attribute::Label(label) => Some(label.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| random_string(16));
+
+        record.attributes = attributes;
+        let content = postcard::to_allocvec(&record).map_err(ObjectStoreError::Serialize)?;
+
+        let id = object_id.0 as i64;
+        let connection = self.connection.lock().unwrap();
+        let updated = connection
+            .execute(
+                "update object set content = ?2, private = ?3, label = ?4 where id = ?1",
+                params![id, content, private, label],
+            )
+            .map_err(ObjectStoreError::Database)?;
+
+        if updated == 0 {
+            return Err(ObjectStoreError::NotFound(object_id.clone()));
+        }
+
+        Ok(())
+    }
+
     fn read_record(&self, object_id: &ObjectId) -> Result<ObjectRecord, ObjectStoreError> {
         let content = self.read_raw(object_id)?;
         postcard::from_bytes(&content).map_err(ObjectStoreError::Serialize)
@@ -355,29 +388,20 @@ mod tests {
         let bytes = vec![0u8; 32];
         let a = store
             .write(
-                vec![
-                    Attribute::Label(String::from("a")),
-                    Attribute::Id(b"shared".to_vec()),
-                ],
+                vec![Attribute::Label(String::from("a")), Attribute::Id(b"shared".to_vec())],
                 &bytes,
             )
             .unwrap();
         let b = store
             .write(
-                vec![
-                    Attribute::Label(String::from("b")),
-                    Attribute::Id(b"shared".to_vec()),
-                ],
+                vec![Attribute::Label(String::from("b")), Attribute::Id(b"shared".to_vec())],
                 &bytes,
             )
             .unwrap();
 
         // Both share the id; only one has label "a".
         assert_eq!(store.search(&[Attribute::Id(b"shared".to_vec())]).unwrap().len(), 2);
-        assert_eq!(
-            store.search(&[Attribute::Label(String::from("a"))]).unwrap(),
-            vec![a]
-        );
+        assert_eq!(store.search(&[Attribute::Label(String::from("a"))]).unwrap(), vec![a]);
         // An unmatched attribute value excludes everything.
         assert!(store.search(&[Attribute::Id(b"other".to_vec())]).unwrap().is_empty());
         // An empty template matches all.

@@ -116,6 +116,9 @@ pub enum HsmError {
     #[error("attribute type invalid")]
     AttributeTypeInvalid,
 
+    #[error("attribute read-only")]
+    AttributeReadOnly,
+
     #[error("key handle invalid")]
     KeyHandleInvalid,
 
@@ -808,6 +811,43 @@ impl Hsm {
         Ok(attributes
             .into_iter()
             .find(|attr| attr.attribute_type() == Some(attribute_type)))
+    }
+
+    /// Applies a `C_SetAttributeValue` update: each attribute replaces (or
+    /// adds) the object's value of that type. Untracked attribute types are
+    /// rejected as invalid, and identity/key-material attributes as read-only.
+    /// Token objects can only be modified in a read/write session.
+    pub fn set_object_attributes(
+        &self,
+        session_id: SessionId,
+        object: ObjectId,
+        updates: Vec<Attribute>,
+    ) -> Result<()> {
+        let session_lock = self.get_session(session_id)?;
+        let session = session_lock.read().unwrap();
+
+        let mut attributes = session.read_object_attributes(&object).map_err(|error| match error {
+            SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
+                HsmError::ObjectStore(ObjectStoreError::Database(e))
+            }
+            _ => HsmError::ObjectHandleInvalid,
+        })?;
+
+        let token_object = attributes.iter().any(|attr| matches!(attr, Attribute::Token(true)));
+        if token_object && matches!(session.state, SessionState::ReadOnly) {
+            return Err(HsmError::SessionReadOnly);
+        }
+
+        for update in updates {
+            let attribute_type = update.attribute_type().ok_or(HsmError::AttributeTypeInvalid)?;
+            if !attribute_type.is_modifiable() {
+                return Err(HsmError::AttributeReadOnly);
+            }
+            attributes.retain(|existing| existing.attribute_type() != Some(attribute_type));
+            attributes.push(update);
+        }
+
+        session.set_object_attributes(&object, attributes).map_err(store_error)
     }
 
     pub fn find_objects_init(&self, session_id: SessionId, attributes: Vec<Attribute>) -> Result<()> {

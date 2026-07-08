@@ -1177,7 +1177,8 @@ fn object_attribute_returns_ec_point_of_public_key() {
         Some(Attribute::Class(crate::attribute::ObjectClass::PublicKey))
     );
     assert_eq!(
-        hsm.object_attribute(session, private_key, AttributeType::KeyType).unwrap(),
+        hsm.object_attribute(session, private_key, AttributeType::KeyType)
+            .unwrap(),
         Some(Attribute::KeyType(crate::attribute::KeyType::Ec))
     );
 }
@@ -1229,11 +1230,13 @@ fn generated_aes_keys_are_searchable_by_synthesized_and_template_attributes() {
     // The synthesized class and key type read back on a found object.
     let key = found[0].clone();
     assert_eq!(
-        hsm.object_attribute(session, key.clone(), AttributeType::Class).unwrap(),
+        hsm.object_attribute(session, key.clone(), AttributeType::Class)
+            .unwrap(),
         Some(Attribute::Class(ObjectClass::SecretKey))
     );
     assert_eq!(
-        hsm.object_attribute(session, key.clone(), AttributeType::KeyType).unwrap(),
+        hsm.object_attribute(session, key.clone(), AttributeType::KeyType)
+            .unwrap(),
         Some(Attribute::KeyType(KeyType::Aes))
     );
     // A template attribute reads back verbatim.
@@ -1287,6 +1290,85 @@ fn generated_rsa_public_key_exposes_derived_attributes() {
         panic!("public key should expose a modulus");
     };
     assert_eq!(modulus.len(), 256);
+}
+
+#[test]
+fn set_object_attributes_updates_readable_value() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let (_public_key, private_key) = hsm
+        .generate_key_pair(
+            session,
+            &Mechanism::RsaPkcsKeyPairGen,
+            vec![
+                Attribute::ModulusBits(2048),
+                Attribute::PublicExponent(vec![0x01, 0x00, 0x01]),
+            ],
+            vec![Attribute::Token(true), Attribute::Extractable(true)],
+        )
+        .unwrap();
+
+    assert_eq!(
+        hsm.object_attribute(session, private_key.clone(), AttributeType::Extractable)
+            .unwrap(),
+        Some(Attribute::Extractable(true))
+    );
+
+    hsm.set_object_attributes(session, private_key.clone(), vec![Attribute::Extractable(false)])
+        .unwrap();
+
+    assert_eq!(
+        hsm.object_attribute(session, private_key, AttributeType::Extractable)
+            .unwrap(),
+        Some(Attribute::Extractable(false))
+    );
+}
+
+#[test]
+fn set_object_attributes_rejects_read_only_and_unknown() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = generate_secret_key(&hsm, session, 32, "target");
+
+    // Identity/key-material attributes are read-only.
+    assert!(matches!(
+        hsm.set_object_attributes(session, key.clone(), vec![Attribute::ValueLen(16)]),
+        Err(HsmError::AttributeReadOnly)
+    ));
+    // Untracked attribute types are invalid.
+    assert!(matches!(
+        hsm.set_object_attributes(session, key.clone(), vec![Attribute::Unknown]),
+        Err(HsmError::AttributeTypeInvalid)
+    ));
+
+    // A rejected update leaves the object unchanged.
+    assert_eq!(
+        hsm.object_attribute(session, key, AttributeType::ValueLen).unwrap(),
+        Some(Attribute::ValueLen(32))
+    );
+}
+
+#[test]
+fn set_object_attributes_on_token_object_needs_read_write_session() {
+    let hsm = hsm_with_token();
+    let rw = user_session(&hsm);
+    let key = hsm
+        .generate_key(
+            rw,
+            &Mechanism::AesKeyGen,
+            vec![Attribute::ValueLen(32), Attribute::Token(true)],
+        )
+        .unwrap();
+
+    // Login is per-slot and already established by `user_session`; a second
+    // read-only session shares it.
+    let ro = hsm.open_session(SLOT, SessionState::ReadOnly).unwrap();
+
+    assert!(matches!(
+        hsm.set_object_attributes(ro, key, vec![Attribute::Extractable(false)]),
+        Err(HsmError::SessionReadOnly)
+    ));
 }
 
 #[test]
