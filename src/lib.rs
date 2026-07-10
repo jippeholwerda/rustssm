@@ -1439,20 +1439,20 @@ pub unsafe fn read_attributes(template: raw::CK_ATTRIBUTE_PTR, count: raw::CK_UL
                 }
 
                 match attr.type_ {
-                    raw::CKA_TOKEN => Attribute::Token(attr_bool(&attr)),
-                    raw::CKA_PRIVATE => Attribute::Private(attr_bool(&attr)),
-                    raw::CKA_SENSITIVE => Attribute::Sensitive(attr_bool(&attr)),
-                    raw::CKA_EXTRACTABLE => Attribute::Extractable(attr_bool(&attr)),
-                    raw::CKA_DERIVE => Attribute::Derive(attr_bool(&attr)),
-                    raw::CKA_SIGN => Attribute::Sign(attr_bool(&attr)),
-                    raw::CKA_VERIFY => Attribute::Verify(attr_bool(&attr)),
-                    raw::CKA_ENCRYPT => Attribute::Encrypt(attr_bool(&attr)),
-                    raw::CKA_DECRYPT => Attribute::Decrypt(attr_bool(&attr)),
-                    raw::CKA_WRAP => Attribute::Wrap(attr_bool(&attr)),
-                    raw::CKA_UNWRAP => Attribute::Unwrap(attr_bool(&attr)),
+                    raw::CKA_TOKEN => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Token),
+                    raw::CKA_PRIVATE => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Private),
+                    raw::CKA_SENSITIVE => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Sensitive),
+                    raw::CKA_EXTRACTABLE => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Extractable),
+                    raw::CKA_DERIVE => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Derive),
+                    raw::CKA_SIGN => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Sign),
+                    raw::CKA_VERIFY => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Verify),
+                    raw::CKA_ENCRYPT => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Encrypt),
+                    raw::CKA_DECRYPT => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Decrypt),
+                    raw::CKA_WRAP => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Wrap),
+                    raw::CKA_UNWRAP => attr_bool(&attr).map_or(Attribute::Unknown, Attribute::Unwrap),
 
-                    raw::CKA_MODULUS_BITS => Attribute::ModulusBits(attr_ulong(&attr)),
-                    raw::CKA_VALUE_LEN => Attribute::ValueLen(attr_ulong(&attr)),
+                    raw::CKA_MODULUS_BITS => attr_ulong(&attr).map_or(Attribute::Unknown, Attribute::ModulusBits),
+                    raw::CKA_VALUE_LEN => attr_ulong(&attr).map_or(Attribute::Unknown, Attribute::ValueLen),
 
                     raw::CKA_EC_PARAMS => attr_bytes(&attr).map_or(Attribute::Unknown, Attribute::EcParams),
                     raw::CKA_EC_POINT => attr_bytes(&attr).map_or(Attribute::Unknown, Attribute::EcPoint),
@@ -1467,19 +1467,19 @@ pub unsafe fn read_attributes(template: raw::CK_ATTRIBUTE_PTR, count: raw::CK_UL
 
                     raw::CKA_CLASS => {
                         let class = match attr_ulong(&attr) {
-                            raw::CKO_PUBLIC_KEY => ObjectClass::PublicKey,
-                            raw::CKO_PRIVATE_KEY => ObjectClass::PrivateKey,
-                            raw::CKO_SECRET_KEY => ObjectClass::SecretKey,
+                            Some(raw::CKO_PUBLIC_KEY) => ObjectClass::PublicKey,
+                            Some(raw::CKO_PRIVATE_KEY) => ObjectClass::PrivateKey,
+                            Some(raw::CKO_SECRET_KEY) => ObjectClass::SecretKey,
                             _ => ObjectClass::Unknown,
                         };
                         Attribute::Class(class)
                     }
                     raw::CKA_KEY_TYPE => {
                         let key_type = match attr_ulong(&attr) {
-                            raw::CKK_RSA => KeyType::Rsa,
-                            raw::CKK_EC => KeyType::Ec,
-                            raw::CKK_AES => KeyType::Aes,
-                            raw::CKK_GENERIC_SECRET => KeyType::GenericSecret,
+                            Some(raw::CKK_RSA) => KeyType::Rsa,
+                            Some(raw::CKK_EC) => KeyType::Ec,
+                            Some(raw::CKK_AES) => KeyType::Aes,
+                            Some(raw::CKK_GENERIC_SECRET) => KeyType::GenericSecret,
                             _ => KeyType::Unknown,
                         };
                         Attribute::KeyType(key_type)
@@ -1503,24 +1503,32 @@ pub unsafe fn read_attributes(template: raw::CK_ATTRIBUTE_PTR, count: raw::CK_UL
     }
 }
 
-/// Reads a `CK_BBOOL` attribute value. The caller must have checked
-/// `pValue` is non-null.
+/// Reads a `CK_BBOOL` attribute value, or `None` if the caller's `ulValueLen`
+/// is not exactly one byte (guarding against an out-of-bounds read of an
+/// undersized buffer). The caller must have checked `pValue` is non-null.
 ///
 /// # Safety
 ///
 /// Dereferences `attr.pValue`.
-unsafe fn attr_bool(attr: &raw::CK_ATTRIBUTE) -> bool {
-    unsafe { *(attr.pValue as *const raw::CK_BBOOL) == raw::CK_TRUE }
+unsafe fn attr_bool(attr: &raw::CK_ATTRIBUTE) -> Option<bool> {
+    if attr.ulValueLen as usize != std::mem::size_of::<raw::CK_BBOOL>() {
+        return None;
+    }
+    Some(unsafe { *(attr.pValue as *const raw::CK_BBOOL) } == raw::CK_TRUE)
 }
 
-/// Reads a `CK_ULONG` attribute value. The caller must have checked
-/// `pValue` is non-null.
+/// Reads a `CK_ULONG` attribute value, or `None` if the caller's `ulValueLen`
+/// does not match `CK_ULONG`'s width (guarding against an out-of-bounds read of
+/// an undersized buffer). The caller must have checked `pValue` is non-null.
 ///
 /// # Safety
 ///
 /// Dereferences `attr.pValue`.
-unsafe fn attr_ulong(attr: &raw::CK_ATTRIBUTE) -> raw::CK_ULONG {
-    unsafe { *(attr.pValue as *const raw::CK_ULONG) }
+unsafe fn attr_ulong(attr: &raw::CK_ATTRIBUTE) -> Option<raw::CK_ULONG> {
+    if attr.ulValueLen as usize != std::mem::size_of::<raw::CK_ULONG>() {
+        return None;
+    }
+    Some(unsafe { *(attr.pValue as *const raw::CK_ULONG) })
 }
 
 /// Copies a byte-array attribute value, rejecting over-long ones. The caller
@@ -1698,5 +1706,48 @@ mod tests {
         let result = unsafe { write_output(&data, buffer.as_mut_ptr(), ptr::null_mut()) };
 
         assert_eq!(result, Err(raw::CKR_ARGUMENTS_BAD));
+    }
+
+    fn attribute(type_: raw::CK_ATTRIBUTE_TYPE, value: &[u8]) -> raw::CK_ATTRIBUTE {
+        raw::CK_ATTRIBUTE {
+            type_,
+            pValue: value.as_ptr() as raw::CK_VOID_PTR,
+            ulValueLen: value.len() as raw::CK_ULONG,
+        }
+    }
+
+    fn read_one(attr: &raw::CK_ATTRIBUTE) -> Attribute {
+        let attrs = unsafe { read_attributes(attr as *const raw::CK_ATTRIBUTE as raw::CK_ATTRIBUTE_PTR, 1) };
+        assert_eq!(attrs.len(), 1);
+        attrs.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn ulong_attribute_with_short_length_is_unknown_not_oob() {
+        // A CK_ULONG-typed attribute (CKA_CLASS) backed by a one-byte buffer:
+        // reading it as an 8-byte CK_ULONG would be an out-of-bounds read. The
+        // length guard yields Class(Unknown) instead of touching the 7 bytes
+        // past the buffer.
+        assert_eq!(
+            read_one(&attribute(raw::CKA_CLASS, &[2u8])),
+            Attribute::Class(ObjectClass::Unknown)
+        );
+        // CKA_VALUE_LEN maps a bad-length ulong to a plain Unknown.
+        assert_eq!(read_one(&attribute(raw::CKA_VALUE_LEN, &[32u8])), Attribute::Unknown);
+    }
+
+    #[test]
+    fn bool_attribute_with_wrong_length_is_unknown() {
+        // A CK_BBOOL is exactly one byte; a four-byte buffer is malformed.
+        assert_eq!(read_one(&attribute(raw::CKA_TOKEN, &[1u8, 0, 0, 0])), Attribute::Unknown);
+    }
+
+    #[test]
+    fn correctly_sized_scalar_attributes_still_parse() {
+        assert_eq!(
+            read_one(&attribute(raw::CKA_CLASS, &raw::CKO_SECRET_KEY.to_ne_bytes())),
+            Attribute::Class(ObjectClass::SecretKey)
+        );
+        assert_eq!(read_one(&attribute(raw::CKA_TOKEN, &[1u8])), Attribute::Token(true));
     }
 }

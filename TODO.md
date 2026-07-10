@@ -259,10 +259,12 @@ Ranked; being worked one at a time.
       accepts any PIN as its new SO PIN. The check runs before `store.clear()`,
       so a wrong PIN cannot destroy objects (covered by
       `reinit_token_with_wrong_so_pin_is_rejected_and_keeps_objects`).
-- [ ] **`attr_bool`/`attr_ulong` bounds** — they dereference `pValue` without
-      checking `ulValueLen`; a `CK_ULONG` attr with `ulValueLen = 1` causes an
-      8-byte out-of-bounds read. Check the length matches `size_of` and reject
-      (or map to `Attribute::Unknown`). The FFI layer's own validation contract.
+- [x] **`attr_bool`/`attr_ulong` bounds** — both now return `Option` and yield
+      `None` when `ulValueLen` doesn't match the scalar's width (`CK_BBOOL` = 1,
+      `CK_ULONG` = 8), mapped to `Attribute::Unknown` at the call sites like the
+      existing `attr_bytes` path. Closes the out-of-bounds read of an undersized
+      buffer. Covered by `ulong_attribute_with_short_length_is_unknown_not_oob`,
+      `bool_attribute_with_wrong_length_is_unknown`, and a positive control.
 - [ ] **Populate `FUNCTION_LIST` stubs** — `C_GetMechanismList`,
       `C_CloseAllSessions`, `C_Digest*`, `C_GetObjectSize`, … are `None` (null C
       function pointers). Real C clients (p11-kit, pkcs11-tool, OpenSSL) call
