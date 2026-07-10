@@ -1261,8 +1261,16 @@ pub unsafe extern "C" fn C_GetAttributeValue(
                 }
                 Ok(None) => {
                     // The object does not carry this (valid) attribute type.
+                    // A key's `CKA_VALUE` is withheld because the material is
+                    // sensitive (`CKR_ATTRIBUTE_SENSITIVE`), which is distinct
+                    // from an attribute type the object genuinely lacks
+                    // (`CKR_ATTRIBUTE_TYPE_INVALID`).
                     attr.ulValueLen = raw::CK_UNAVAILABLE_INFORMATION;
-                    result = Err(raw::CKR_ATTRIBUTE_TYPE_INVALID);
+                    result = Err(if attribute_type == AttributeType::Value {
+                        raw::CKR_ATTRIBUTE_SENSITIVE
+                    } else {
+                        raw::CKR_ATTRIBUTE_TYPE_INVALID
+                    });
                 }
                 Err(error) => {
                     attr.ulValueLen = raw::CK_UNAVAILABLE_INFORMATION;

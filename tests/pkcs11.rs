@@ -371,6 +371,24 @@ fn pkcs11_end_to_end() {
         raw::CKR_OK
     );
 
+    // CKA_VALUE of a secret key is withheld as sensitive (not reported as an
+    // invalid type), while an attribute the object genuinely lacks (CKA_MODULUS
+    // on a symmetric key) stays CKR_ATTRIBUTE_TYPE_INVALID. Both set
+    // ulValueLen = CK_UNAVAILABLE_INFORMATION.
+    let c_get_attribute_value = fl.C_GetAttributeValue.unwrap();
+    let mut value_query = [attr(raw::CKA_VALUE, ptr::null::<u8>(), 0)];
+    assert_eq!(
+        unsafe { c_get_attribute_value(session, sym_key, value_query.as_mut_ptr(), 1) },
+        raw::CKR_ATTRIBUTE_SENSITIVE
+    );
+    assert_eq!(value_query[0].ulValueLen, raw::CK_UNAVAILABLE_INFORMATION);
+
+    let mut modulus_query = [attr(raw::CKA_MODULUS, ptr::null::<u8>(), 0)];
+    assert_eq!(
+        unsafe { c_get_attribute_value(session, sym_key, modulus_query.as_mut_ptr(), 1) },
+        raw::CKR_ATTRIBUTE_TYPE_INVALID
+    );
+
     let message = b"authenticated message";
     let hmac = no_param(raw::CKM_SHA256_HMAC);
     assert_eq!(

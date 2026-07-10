@@ -229,6 +229,27 @@ multipart operations.
 
 ## 3. Internals / tech debt
 
+- [ ] **SQL pre-filter for object search** (decided 2026-07-10: keep the scan
+      until the numbers say otherwise). `ObjectStore::search` is a full-table
+      scan: it selects every row, postcard-decodes each record, and matches
+      the template in Rust. Measured (release, in-memory, template
+      `[Private, Label]`): ~20µs per search at 100 objects, ~190µs at 1,000,
+      ~1.9ms at 10,000 — linear, and the scan holds the store `Mutex`, so at
+      large n it also serializes concurrent operations. At the intended scale
+      (a handful of named token keys; bulk keys live outside the HSM as
+      wrapped blobs) this is immaterial. If a store is ever expected to hold
+      thousands of objects: keep the Rust match as the single source of truth
+      and add a conservative SQL pre-filter — when the template carries a
+      `Label`, narrow with `where label = ?` plus an index on `label`, then
+      decode and Rust-verify only the candidates. Prerequisite: store `NULL`
+      in the `label` column for unlabelled objects instead of
+      `random_string(16)` (`indexed_columns`) — the column becomes
+      load-bearing, and a wrong value would cause false negatives. Do NOT
+      move full template matching into SQL (attribute table / JSON1): that
+      duplicates the matching semantics in a second encoding that must agree
+      with `Attribute` equality forever, and a divergence returns the wrong
+      key handle.
+
 - [ ] **Switch persisted object records from postcard to CBOR** (ciborium).
       postcard encodes enums by discriminant index and struct fields
       positionally, with no names or framing — so reordering/inserting a
@@ -295,9 +316,10 @@ Ranked; being worked one at a time.
       DigestInfo). Raw `CKM_RSA_PKCS` must pad the data as given, no hashing.
       Self-consistent internally (own tests pass), breaks external interop.
       No nl-wallet impact (no RSA). Fix via the `rsa` crate's unprefixed path.
-- [ ] **`CKA_VALUE` of a sensitive key** returns `CKR_ATTRIBUTE_TYPE_INVALID`;
-      spec wants `CKR_ATTRIBUTE_SENSITIVE` (`ulValueLen` already set to
-      `CK_UNAVAILABLE_INFORMATION`).
+- [x] **`CKA_VALUE` of a sensitive key** now returns `CKR_ATTRIBUTE_SENSITIVE`
+      (with `ulValueLen = CK_UNAVAILABLE_INFORMATION`) in `C_GetAttributeValue`,
+      distinct from `CKR_ATTRIBUTE_TYPE_INVALID` for an attribute the object
+      genuinely lacks. Covered in the FFI test (`pkcs11_end_to_end`).
 - [ ] **README: wrapped-key portability** — `C_WrapKey` wraps the raw 32-byte
       EC scalar, while SoftHSM wraps a PKCS#8 `PrivateKeyInfo`; wrapped keys are
       not portable between the two implementations. Worth a README line.
