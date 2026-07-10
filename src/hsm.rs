@@ -549,14 +549,14 @@ impl Hsm {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
-        reject_unsupported_attributes(&attributes)?;
-        require_login_for_private(&attributes, logged_in)?;
-        self.check_writable(&session, &attributes)?;
-
         let class = attributes.iter().find_map(|attr| match attr {
-            Attribute::Class(class) => Some(class),
+            Attribute::Class(class) => Some(*class),
             _ => None,
         });
+
+        reject_unsupported_attributes(&attributes)?;
+        require_login_to_create(&attributes, class, logged_in)?;
+        self.check_writable(&session, &attributes)?;
 
         match class {
             Some(ObjectClass::SecretKey) => {
@@ -635,7 +635,9 @@ impl Hsm {
         let session = session_lock.read().unwrap();
 
         reject_unsupported_attributes(&attributes)?;
-        require_login_for_private(&attributes, logged_in)?;
+        // A generated symmetric key is a secret key, which is private by
+        // default, so creating one without login requires it (§4.4).
+        require_login_to_create(&attributes, Some(ObjectClass::SecretKey), logged_in)?;
         self.check_writable(&session, &attributes)?;
 
         let (key_len, key_type) = match mechanism {
@@ -680,8 +682,10 @@ impl Hsm {
 
         reject_unsupported_attributes(&public_key_attributes)?;
         reject_unsupported_attributes(&private_key_attributes)?;
-        require_login_for_private(&public_key_attributes, logged_in)?;
-        require_login_for_private(&private_key_attributes, logged_in)?;
+        // The private half is private by default, so generating a pair without
+        // login is refused unless it is explicitly made public (§4.4).
+        require_login_to_create(&public_key_attributes, Some(ObjectClass::PublicKey), logged_in)?;
+        require_login_to_create(&private_key_attributes, Some(ObjectClass::PrivateKey), logged_in)?;
 
         {
             let session = session_lock.read().unwrap();
@@ -819,9 +823,14 @@ impl Hsm {
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
+        let class = attributes.iter().find_map(|attr| match attr {
+            Attribute::Class(class) => Some(*class),
+            _ => None,
+        });
+
         reject_unsupported_attributes(&attributes)?;
         require_object_access(&session, &unwrapping_key, logged_in)?;
-        require_login_for_private(&attributes, logged_in)?;
+        require_login_to_create(&attributes, class, logged_in)?;
 
         match mechanism {
             Mechanism::AesKeyWrapPad => {
@@ -1393,6 +1402,32 @@ fn is_private(attributes: &[Attribute]) -> bool {
 /// `logged_in_as_user` must be captured from the slot before the session lock.
 fn require_login_for_private(attributes: &[Attribute], logged_in_as_user: bool) -> Result<()> {
     if !logged_in_as_user && is_private(attributes) {
+        return Err(HsmError::UserNotLoggedIn);
+    }
+    Ok(())
+}
+
+/// Whether an object created from `template` for `class` ends up private,
+/// accounting for the `CKA_PRIVATE` class default materialized when the
+/// template omits it (see [`default_boolean_attributes`]). An explicit
+/// template value wins; otherwise the class default decides.
+fn effective_private(template: &[Attribute], class: Option<ObjectClass>) -> bool {
+    if let Some(explicit) = template.iter().find_map(|attr| match attr {
+        Attribute::Private(value) => Some(*value),
+        _ => None,
+    }) {
+        return explicit;
+    }
+    class.is_some_and(|class| is_private(&default_boolean_attributes(class)))
+}
+
+/// Enforces §4.4 at object creation: a session not logged in as the normal user
+/// may not create a private object. Unlike [`require_login_for_private`], which
+/// inspects an already-complete attribute list, this reads the effective
+/// `CKA_PRIVATE` — so a key that is private only by its class default is gated
+/// too, matching SoftHSM (which applies the default before the check).
+fn require_login_to_create(template: &[Attribute], class: Option<ObjectClass>, logged_in_as_user: bool) -> Result<()> {
+    if !logged_in_as_user && effective_private(template, class) {
         return Err(HsmError::UserNotLoggedIn);
     }
     Ok(())

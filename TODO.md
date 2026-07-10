@@ -362,10 +362,19 @@ Ranked; being worked one at a time.
       "public" objects in the login tests set `CKA_PRIVATE=false` explicitly.
       `copy_object` inherits the source's already-materialized list, so it needs
       no change. Covered by `write_paths_materialize_class_default_booleans`.
-      Known follow-up (separate decision): the creation login check reads the
-      template, not the materialized default, so a not-logged-in session can
-      still create a secret key that lands private-by-default and is then
-      unusable until login; SoftHSM rejects that up front.
+- [x] **Creation login check reads effective privacy** — follow-up to the
+      above. The §4.4 creation check now gates on the *effective* `CKA_PRIVATE`
+      (explicit template value, else the class default) via
+      `require_login_to_create`/`effective_private`, so a not-logged-in session
+      can no longer create a key that is private only by its class default and
+      then find it unusable — it is refused up front with
+      `CKR_USER_NOT_LOGGED_IN`, matching SoftHSM (which applies the default
+      before the check). Wired into `create_object`, `generate_key`,
+      `generate_key_pair`, and `unwrap_key`; by-handle access and `copy_object`
+      already read the object's complete stored list, so they keep
+      `require_login_for_private`. The read-only-session tests now log the token
+      in first so the RO rejection (not login) is what fires. Covered by the
+      extended `creating_a_private_object_requires_login`.
 - [ ] **Reject duplicate attribute types in templates** — a creation template
       carrying the same attribute type twice is stored twice; readback then
       returns whichever comes first while search matches either value. Spec:

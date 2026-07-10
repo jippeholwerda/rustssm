@@ -634,6 +634,9 @@ fn generate_key_rejects_wrong_mechanism() {
 #[test]
 fn token_objects_cannot_be_created_in_read_only_session() {
     let hsm = hsm_with_token();
+    // Log the token in (secret keys are private by default) so the read-only
+    // rejection is what fires, not the §4.4 login check.
+    let _authed = user_session(&hsm);
     let session = hsm.open_session(SLOT, SessionState::ReadOnly).unwrap();
 
     assert!(matches!(
@@ -1207,6 +1210,18 @@ fn creating_a_private_object_requires_login() {
         Err(HsmError::UserNotLoggedIn)
     ));
 
+    // ...nor one that is private only by its class default (no CKA_PRIVATE in
+    // the template), matching SoftHSM, which applies the default before the
+    // §4.4 check rather than after.
+    assert!(matches!(
+        hsm.generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![Attribute::ValueLen(32), Attribute::Label(String::from("def"))],
+        ),
+        Err(HsmError::UserNotLoggedIn)
+    ));
+
     // ...but an explicitly public key is allowed. (A secret key is private by
     // default, so the public one must set CKA_PRIVATE=false.)
     assert!(
@@ -1609,6 +1624,9 @@ fn create_token_object_in_read_only_session_is_rejected() {
     use crate::attribute::ObjectClass;
 
     let hsm = hsm_with_token();
+    // Log the token in (secret keys are private by default) so the read-only
+    // rejection is what fires, not the §4.4 login check.
+    let _authed = user_session(&hsm);
     let session = hsm.open_session(SLOT, SessionState::ReadOnly).unwrap();
 
     assert!(matches!(
