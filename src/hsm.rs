@@ -1135,7 +1135,19 @@ impl Hsm {
                 }
             }
             Mechanism::Ecdsa => {
-                let verifying_key: VerifyingKey = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                // A public-key handle stores the `VerifyingKey` directly; a
+                // private-key handle stores the P-256 scalar, so the public
+                // key is derived from it.
+                let verifying_key = match read_handle::<VerifyingKey>(&session, &key, HsmError::KeyHandleInvalid) {
+                    Ok(vk) => vk,
+                    Err(HsmError::KeyHandleInvalid) => {
+                        let key_bytes: Vec<u8> = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                        let signing_key =
+                            ecdsa::SigningKey::from_slice(&key_bytes).map_err(|_| HsmError::KeyHandleInvalid)?;
+                        *signing_key.verifying_key()
+                    }
+                    Err(e) => return Err(e),
+                };
                 Operation::VerifyEcdsa {
                     verifying_key: Box::new(verifying_key),
                 }

@@ -764,6 +764,36 @@ fn ecdsa_sign_verify_roundtrip_and_tamper_detection() {
 }
 
 #[test]
+fn ecdsa_verify_via_private_key_handle_derives_public_key() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let (_public_key, private_key) = hsm
+        .generate_key_pair(session, &Mechanism::EcKeyPairGen, vec![], vec![])
+        .unwrap();
+
+    // Sign with the private key.
+    let digest = [0x5Au8; 32];
+    hsm.sign_init(session, &Mechanism::Ecdsa, private_key.clone()).unwrap();
+    let signature = hsm.sign(session, &digest).unwrap();
+
+    // Verify with the *private* key handle: verify_init derives the public
+    // key from the stored scalar instead of failing.
+    hsm.verify_init(session, &Mechanism::Ecdsa, private_key.clone())
+        .unwrap();
+    hsm.verify(session, &digest, &signature).unwrap();
+
+    // Tampered signature is still rejected.
+    let mut tampered = signature.clone();
+    tampered[0] ^= 0xFF;
+    hsm.verify_init(session, &Mechanism::Ecdsa, private_key).unwrap();
+    assert!(matches!(
+        hsm.verify(session, &digest, &tampered),
+        Err(HsmError::SignatureInvalid)
+    ));
+}
+
+#[test]
 fn hmac_sign_verify_roundtrip() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);

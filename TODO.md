@@ -210,11 +210,18 @@ TODOs, roughly in dependency order:
       `create_ec_private_key_accepts_explicit_p256_params`,
       `generate_key_pair_rejects_unsupported_curve`, and
       `generate_key_pair_accepts_explicit_p256_params`.
-- [ ] **ECDSA verify via private-key handle** — the `Pkcs11Client::verify`
+- [x] **ECDSA verify via private-key handle** — the `Pkcs11Client::verify`
       trait method allows `SigningMechanism::Ecdsa256` with a private-key
       handle (today nl-wallet only verifies HMACs). `C_VerifyInit` with
-      `CKM_ECDSA` on a private key handle should derive the public key
-      instead of failing.
+      `CKM_ECDSA` on a private key handle now derives the public key from the
+      stored scalar instead of failing: the Ecdsa arm first tries to read the
+      handle as a `VerifyingKey` (public-key handle), and on failure falls
+      back to reading the raw scalar, constructing a `SigningKey`, and
+      deriving its `VerifyingKey`. A DB error on the first attempt
+      propagates immediately; only a deserialization mismatch triggers the
+      fallback. Covered by `ecdsa_verify_via_private_key_handle_derives_public_key`
+      (signs with the private key, verifies with the private-key handle,
+      and confirms tampered signatures are still rejected).
 - [x] **Attribute storage for unwrapped keys** — `unwrap_signing_key` passes
       a template (`CKA_CLASS`, `CKA_KEY_TYPE`, `CKA_TOKEN`, `CKA_PRIVATE`);
       rustssm now persists the full template like every other object-creating
