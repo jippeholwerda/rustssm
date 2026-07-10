@@ -243,6 +243,38 @@ fn init_token_destroys_objects_and_resets_user_pin() {
 }
 
 #[test]
+fn reinit_token_with_wrong_so_pin_is_rejected_and_keeps_objects() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    // A token (persistent) object, so it outlives its creating session and
+    // would only vanish if `init_token` actually wiped the store.
+    let key = hsm
+        .generate_key(
+            session,
+            &Mechanism::GenericSecretKeyGen,
+            vec![
+                Attribute::ValueLen(32),
+                Attribute::Label(String::from("keep")),
+                Attribute::Private(true),
+                Attribute::Token(true),
+            ],
+        )
+        .unwrap();
+    hsm.close_session(session).unwrap();
+
+    // Re-initializing an initialized token with the wrong SO PIN is refused...
+    assert!(matches!(
+        hsm.init_token(&SLOT, Pin::new("wrong-so-pin"), None),
+        Err(HsmError::PinIncorrect)
+    ));
+
+    // ...and the token's objects and user PIN are left untouched.
+    let session = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+    assert!(hsm.object_exists(session, key).unwrap());
+    assert!(hsm.token_status(SLOT).unwrap().user_pin_set);
+}
+
+#[test]
 fn token_state_survives_a_restart() {
     let path = std::env::temp_dir().join(format!("rustssm-persist-{}.db", std::process::id()));
     for suffix in ["", "-wal", "-shm"] {

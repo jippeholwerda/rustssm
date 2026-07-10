@@ -340,6 +340,14 @@ impl Hsm {
             return Err(HsmError::SessionExists(*slot_id));
         }
 
+        // Re-initializing an already-initialized token requires the supplied SO
+        // PIN to match the existing one (PKCS#11 §5.6); a fresh token accepts
+        // any PIN as its new SO PIN. Checked before `clear()` so a wrong PIN
+        // cannot destroy the token's objects.
+        if slot.initialized && !slot.so_pin.as_ref().is_some_and(|hash| hash.verify(&so_pin)) {
+            return Err(HsmError::PinIncorrect);
+        }
+
         // (Re)initializing a token destroys all its objects and resets its PINs.
         store.clear().map_err(HsmError::ObjectStore)?;
 

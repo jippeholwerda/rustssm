@@ -253,10 +253,12 @@ Ranked; being worked one at a time.
       can now only affect that one token's objects, so no `slot_id` column on
       `object` is needed. `SlotSelector::Free`/`--free` still resolves to slot 0
       when uninitialized.
-- [ ] **`C_InitToken` must verify the SO PIN on re-init** — `init_token`
-      currently accepts any PIN and re-initializes. Spec §5.6: re-initializing
-      an initialized token requires the supplied PIN to match the existing SO
-      PIN, else `CKR_PIN_INCORRECT`. Three-line guard against `slot.so_pin`.
+- [x] **`C_InitToken` must verify the SO PIN on re-init** — `init_token` now
+      rejects a re-init of an already-initialized token unless the supplied SO
+      PIN matches the stored one (`CKR_PIN_INCORRECT`); a fresh token still
+      accepts any PIN as its new SO PIN. The check runs before `store.clear()`,
+      so a wrong PIN cannot destroy objects (covered by
+      `reinit_token_with_wrong_so_pin_is_rejected_and_keeps_objects`).
 - [ ] **`attr_bool`/`attr_ulong` bounds** — they dereference `pValue` without
       checking `ulValueLen`; a `CK_ULONG` attr with `ulValueLen = 1` causes an
       8-byte out-of-bounds read. Check the length matches `size_of` and reject
