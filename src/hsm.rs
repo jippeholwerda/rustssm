@@ -607,6 +607,7 @@ impl Hsm {
 
         let mut attributes = vec![
             Attribute::Class(ObjectClass::SecretKey),
+            Attribute::KeyType(KeyType::Aes),
             Attribute::Label(label),
             Attribute::Private(true),
             Attribute::Token(true),
@@ -822,6 +823,11 @@ impl Hsm {
                     .map_err(|_| HsmError::WrappedKeyInvalid)?
                     .to_vec();
 
+                // Run the template through the same merge as every other
+                // object-creating path, so `Unknown`/`Unsupported`/`Value`
+                // attributes are dropped rather than persisted (a stored
+                // `Unknown` would spuriously match search templates).
+                let attributes = merge_attributes(attributes, vec![]);
                 let object_id = session.write_object(&key_bytes, attributes).map_err(store_error)?;
                 Ok(object_id)
             }

@@ -1593,7 +1593,7 @@ pub unsafe fn read_attributes(template: raw::CK_ATTRIBUTE_PTR, count: raw::CK_UL
 ///
 /// Dereferences `attr.pValue`.
 unsafe fn attr_bool(attr: &raw::CK_ATTRIBUTE) -> Option<bool> {
-    if attr.ulValueLen as usize != std::mem::size_of::<raw::CK_BBOOL>() {
+    if attr.ulValueLen as usize != size_of::<raw::CK_BBOOL>() {
         return None;
     }
     Some(unsafe { *(attr.pValue as *const raw::CK_BBOOL) } == raw::CK_TRUE)
@@ -1607,7 +1607,7 @@ unsafe fn attr_bool(attr: &raw::CK_ATTRIBUTE) -> Option<bool> {
 ///
 /// Dereferences `attr.pValue`.
 unsafe fn attr_ulong(attr: &raw::CK_ATTRIBUTE) -> Option<raw::CK_ULONG> {
-    if attr.ulValueLen as usize != std::mem::size_of::<raw::CK_ULONG>() {
+    if attr.ulValueLen as usize != size_of::<raw::CK_ULONG>() {
         return None;
     }
     Some(unsafe { *(attr.pValue as *const raw::CK_ULONG) })
@@ -1821,7 +1821,10 @@ mod tests {
     #[test]
     fn bool_attribute_with_wrong_length_is_unknown() {
         // A CK_BBOOL is exactly one byte; a four-byte buffer is malformed.
-        assert_eq!(read_one(&attribute(raw::CKA_TOKEN, &[1u8, 0, 0, 0])), Attribute::Unknown);
+        assert_eq!(
+            read_one(&attribute(raw::CKA_TOKEN, &[1u8, 0, 0, 0])),
+            Attribute::Unknown
+        );
     }
 
     #[test]

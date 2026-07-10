@@ -276,13 +276,15 @@ Ranked; being worked one at a time.
       `function_list_is_fully_populated` and
       `stubbed_function_returns_not_supported_rather_than_crashing`. (When a real
       implementation lands for one of these, it replaces its stub.)
-- [ ] **`unwrap_key` should merge attributes** — it is the only object-creating
-      path that skips `merge_attributes`, so an `Unknown` template attribute
-      gets persisted and (since `Unknown == Unknown`) later matches unrelated
-      search templates. `merge_attributes(attributes, vec![])` fixes it and
-      makes the path consistent with `create_object`.
-- [ ] **`import_secret_key` should set `KeyType(Aes)`** — an imported AES key is
-      not findable by a `KeyType` template the way a generated one is.
+- [x] **`unwrap_key` should merge attributes** — now runs its template through
+      `merge_attributes(attributes, vec![])` like every other object-creating
+      path, so `Unknown`/`Unsupported`/`Value` attributes are dropped rather than
+      persisted (a stored `Unknown` would spuriously match search templates).
+      Covered by `unwrap_drops_untracked_template_attributes`.
+- [x] **`import_secret_key` should set `KeyType(Aes)`** — imported AES keys now
+      carry `CKA_KEY_TYPE = AES`, so they are findable by a `KeyType` template
+      exactly like a generated AES key. Covered by the extended
+      `import_aes_key_stores_a_usable_key`.
 - [ ] **Login enforcement — decide and act** — private objects
       (`CKA_PRIVATE` true) are findable/usable without `C_Login`; only PIN
       management is login-gated. nl-wallet always logs in, so no impact.

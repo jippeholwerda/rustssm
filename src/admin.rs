@@ -320,6 +320,17 @@ mod tests {
             Some(crate::attribute::Attribute::Id(b"wrapping-id".to_vec()))
         );
 
+        // The imported key is findable by CKA_KEY_TYPE = AES, exactly like a
+        // generated AES key.
+        hsm.find_objects_init(
+            session,
+            vec![crate::attribute::Attribute::KeyType(crate::attribute::KeyType::Aes)],
+        )
+        .unwrap();
+        let by_type = hsm.find_objects_next(session, 10).unwrap();
+        hsm.find_objects_final(session).unwrap();
+        assert_eq!(by_type, found);
+
         let mechanism = Mechanism::AesGcm {
             initialization_vector: vec![0x22; 12],
             additional_authenticated_data: vec![],

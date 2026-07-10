@@ -1057,6 +1057,43 @@ fn wrap_unwrap_roundtrip() {
 }
 
 #[test]
+fn unwrap_drops_untracked_template_attributes() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let wrapping_key = generate_secret_key(&hsm, session, 32, "kek");
+    let key = generate_secret_key(&hsm, session, 32, "payload");
+    let wrapped = hsm
+        .wrap_key(session, &Mechanism::AesKeyWrapPad, wrapping_key.clone(), key)
+        .unwrap();
+
+    // Unwrap with a template carrying an untracked (Unknown) attribute: it must
+    // be dropped, not persisted, like every other object-creating path.
+    let unwrapped = hsm
+        .unwrap_key(
+            session,
+            &Mechanism::AesKeyWrapPad,
+            wrapping_key,
+            &wrapped,
+            vec![Attribute::Label(String::from("unwrapped")), Attribute::Unknown],
+        )
+        .unwrap();
+
+    // A search whose template carries an Unknown attribute must not match it
+    // (it would if the Unknown had been stored, since `Unknown == Unknown`).
+    hsm.find_objects_init(session, vec![Attribute::Unknown]).unwrap();
+    let found = hsm.find_objects_next(session, 10).unwrap();
+    hsm.find_objects_final(session).unwrap();
+    assert!(!found.contains(&unwrapped));
+
+    // It remains findable by its real label.
+    hsm.find_objects_init(session, vec![Attribute::Label(String::from("unwrapped"))])
+        .unwrap();
+    let found = hsm.find_objects_next(session, 10).unwrap();
+    hsm.find_objects_final(session).unwrap();
+    assert_eq!(found, vec![unwrapped]);
+}
+
+#[test]
 fn wrap_with_wrong_size_kek_is_rejected() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
