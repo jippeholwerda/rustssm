@@ -189,9 +189,9 @@ fn finalize_closes_sessions_and_logs_out() {
 }
 
 #[test]
-fn slot_ids_are_stable_and_sorted() {
+fn there_is_a_single_slot() {
     let hsm = hsm();
-    assert_eq!(hsm.slot_ids().unwrap(), vec![0, 1, 2, 3]);
+    assert_eq!(hsm.slot_ids().unwrap(), vec![0]);
 }
 
 // ---- token initialization ----------------------------------------------
@@ -1234,9 +1234,10 @@ fn generate_key_rejects_token_managed_attributes() {
 
 #[test]
 fn create_ec_private_key_is_importable_and_signs() {
+    use signature::hazmat::PrehashVerifier;
+
     use crate::attribute::KeyType;
     use crate::attribute::ObjectClass;
-    use signature::hazmat::PrehashVerifier;
 
     let hsm = hsm_with_token();
     let session = user_session(&hsm);

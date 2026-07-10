@@ -232,16 +232,20 @@ mod tests {
     }
 
     #[test]
-    fn init_token_free_picks_an_uninitialized_slot_and_token_finds_it() {
+    fn init_token_free_picks_the_slot_and_token_finds_it() {
         let _db = TempDb::new("free");
 
-        // Slot 0 is taken first...
+        // The single slot is uninitialized, so --free lands on it.
         let first = init_token(SlotSelector::Free, String::from("a"), String::from(SO_PIN), None).unwrap();
-        // ...so the next --free lands on a different slot.
-        let second = init_token(SlotSelector::Free, String::from("b"), String::from(SO_PIN), None).unwrap();
-        assert_ne!(first, second);
+        assert_eq!(first, 0);
 
-        // A token can then be located by its label.
+        // With the only slot now initialized, --free has nothing left to give.
+        assert!(matches!(
+            init_token(SlotSelector::Free, String::from("b"), String::from(SO_PIN), None),
+            Err(super::AdminError::NoFreeSlot)
+        ));
+
+        // The token can still be located by its label.
         let found = init_token(
             SlotSelector::Token(String::from("a")),
             String::from("a"),
@@ -257,7 +261,7 @@ mod tests {
         let _db = TempDb::new("show");
 
         init_token(
-            SlotSelector::Slot(1),
+            SlotSelector::Slot(0),
             String::from("only one"),
             String::from(SO_PIN),
             Some(String::from(USER_PIN)),
@@ -265,11 +269,11 @@ mod tests {
         .unwrap();
 
         let slots = show_slots().unwrap();
-        assert_eq!(slots.len(), 4);
-        let one = slots.iter().find(|s| s.slot_id == 1).unwrap();
+        assert_eq!(slots.len(), 1);
+        let one = &slots[0];
+        assert_eq!(one.slot_id, 0);
         assert!(one.initialized && one.user_pin_set);
         assert_eq!(one.label.as_deref(), Some("only one"));
-        assert_eq!(slots.iter().filter(|s| !s.initialized).count(), 3);
     }
 
     #[test]

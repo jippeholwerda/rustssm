@@ -189,10 +189,13 @@ pub struct Hsm {
 
 impl Default for Hsm {
     fn default() -> Self {
+        // rustssm exposes a single token. PKCS#11 is slot-addressed, so the slot
+        // is still keyed by `SlotId`, but there is exactly one.
         Self {
-            slots: RwLock::new(HashMap::from_iter(
-                (0..4).map(|i| (SlotId(i), Arc::new(RwLock::new(Slot::default())))),
-            )),
+            slots: RwLock::new(HashMap::from_iter([(
+                SlotId(0),
+                Arc::new(RwLock::new(Slot::default())),
+            )])),
             object_store: OnceLock::new(),
             next_session_id: AtomicU64::new(1),
             initialized: AtomicBool::new(false),

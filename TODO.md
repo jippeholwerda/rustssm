@@ -241,3 +241,52 @@ multipart operations.
       the double serialization (key material is postcard'd, then the wrapping
       `ObjectRecord` is postcard'd again). Interim mitigation if deferred: a
       stored format-version guard plus an append-only rule for those enums.
+
+## 4. Code review findings (2026-07-09)
+
+Ranked; being worked one at a time.
+
+- [x] **Single-slot module** — collapsed the slot map from four slots to one.
+      PKCS#11 stays slot-addressed (`SlotId`), but there is exactly one token,
+      which is all nl-wallet uses (it takes the first initialized token). This
+      removes the cross-slot object wipe: `init_token`'s store-wide `clear()`
+      can now only affect that one token's objects, so no `slot_id` column on
+      `object` is needed. `SlotSelector::Free`/`--free` still resolves to slot 0
+      when uninitialized.
+- [ ] **`C_InitToken` must verify the SO PIN on re-init** — `init_token`
+      currently accepts any PIN and re-initializes. Spec §5.6: re-initializing
+      an initialized token requires the supplied PIN to match the existing SO
+      PIN, else `CKR_PIN_INCORRECT`. Three-line guard against `slot.so_pin`.
+- [ ] **`attr_bool`/`attr_ulong` bounds** — they dereference `pValue` without
+      checking `ulValueLen`; a `CK_ULONG` attr with `ulValueLen = 1` causes an
+      8-byte out-of-bounds read. Check the length matches `size_of` and reject
+      (or map to `Attribute::Unknown`). The FFI layer's own validation contract.
+- [ ] **Populate `FUNCTION_LIST` stubs** — `C_GetMechanismList`,
+      `C_CloseAllSessions`, `C_Digest*`, `C_GetObjectSize`, … are `None` (null C
+      function pointers). Real C clients (p11-kit, pkcs11-tool, OpenSSL) call
+      `C_GetMechanismList` unconditionally and segfault on null; rust-cryptoki
+      null-checks, which is why we haven't been bitten. Add stubs returning
+      `CKR_FUNCTION_NOT_SUPPORTED` (or implement where cheap).
+- [ ] **`unwrap_key` should merge attributes** — it is the only object-creating
+      path that skips `merge_attributes`, so an `Unknown` template attribute
+      gets persisted and (since `Unknown == Unknown`) later matches unrelated
+      search templates. `merge_attributes(attributes, vec![])` fixes it and
+      makes the path consistent with `create_object`.
+- [ ] **`import_secret_key` should set `KeyType(Aes)`** — an imported AES key is
+      not findable by a `KeyType` template the way a generated one is.
+- [ ] **Login enforcement — decide and act** — private objects
+      (`CKA_PRIVATE` true) are findable/usable without `C_Login`; only PIN
+      management is login-gated. nl-wallet always logs in, so no impact.
+      Either enforce `CKR_USER_NOT_LOGGED_IN` on private-object access or
+      document the deviation in the README error-policy section.
+- [ ] **`CKM_RSA_PKCS` uses the wrong padding** — it is implemented as
+      `CKM_SHA256_RSA_PKCS` (`pkcs1v15::SigningKey::<Sha256>` hashes + embeds
+      DigestInfo). Raw `CKM_RSA_PKCS` must pad the data as given, no hashing.
+      Self-consistent internally (own tests pass), breaks external interop.
+      No nl-wallet impact (no RSA). Fix via the `rsa` crate's unprefixed path.
+- [ ] **`CKA_VALUE` of a sensitive key** returns `CKR_ATTRIBUTE_TYPE_INVALID`;
+      spec wants `CKR_ATTRIBUTE_SENSITIVE` (`ulValueLen` already set to
+      `CK_UNAVAILABLE_INFORMATION`).
+- [ ] **README: wrapped-key portability** — `C_WrapKey` wraps the raw 32-byte
+      EC scalar, while SoftHSM wraps a PKCS#8 `PrivateKeyInfo`; wrapped keys are
+      not portable between the two implementations. Worth a README line.
