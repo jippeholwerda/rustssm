@@ -392,13 +392,16 @@ Ranked; being worked one at a time.
       `unwrap_key_rejects_duplicate_attribute_types`,
       `copy_object_rejects_duplicate_attribute_types`, and a positive control
       (`duplicate_attribute_types_check_allows_distinct_types`).
-- [ ] **Search template with an untracked attribute must match nothing —
-      explicitly** — an unrecognized attribute in a `C_FindObjectsInit`
-      template parses to `Attribute::Unknown`, and `Unknown == Unknown`, so
-      matching relies on no object ever *storing* an `Unknown`. That is true
-      today (all object-creating paths run `merge_attributes`, which drops
-      them) but only by construction. Make the semantics explicit: have
-      `find_objects_init` (or `search`) treat a template containing `Unknown`
-      as matching zero objects, with a test, so a future write path that
-      forgets to merge can't silently turn two different unrecognized
-      attributes into a wildcard match of each other.
+- [x] **Search template with an untracked attribute must match nothing —
+      explicitly** — `ObjectStore::search` now returns an empty result when
+      the template contains an `Attribute::Unknown`, before scanning any rows.
+      Previously matching relied on no object ever *storing* an `Unknown`
+      (true by construction — every object-creating path runs
+      `merge_attributes`, which drops them — but only by convention). Making
+      the semantics explicit means a future write path that forgets to merge
+      cannot silently turn two different unrecognized attributes into a
+      wildcard match of each other. Covered by
+      `search_template_with_unknown_matches_nothing` (stores an `Unknown`
+      directly via the store-level `write` to prove the guard, not just the
+      construction invariant, is what blocks the match) and the existing
+      `unwrap_drops_untracked_template_attributes` hsm-level test.

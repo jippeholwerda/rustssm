@@ -721,7 +721,8 @@ fn rsa_pkcs_pads_raw_data_and_rejects_oversized_input() {
     // CKM_RSA_PKCS pads the input as given (no hashing/DigestInfo), so a short
     // "digest" round-trips directly.
     let short = [0x11u8; 32];
-    hsm.sign_init(session, &Mechanism::RsaPkcs, private_key.clone()).unwrap();
+    hsm.sign_init(session, &Mechanism::RsaPkcs, private_key.clone())
+        .unwrap();
     let signature = hsm.sign(session, &short).unwrap();
     hsm.verify_init(session, &Mechanism::RsaPkcs, public_key).unwrap();
     hsm.verify(session, &short, &signature).unwrap();
@@ -1224,8 +1225,8 @@ fn creating_a_private_object_requires_login() {
 
     // ...but an explicitly public key is allowed. (A secret key is private by
     // default, so the public one must set CKA_PRIVATE=false.)
-    assert!(
-        hsm.generate_key(
+    assert!(hsm
+        .generate_key(
             session,
             &Mechanism::AesKeyGen,
             vec![
@@ -1234,8 +1235,7 @@ fn creating_a_private_object_requires_login() {
                 Attribute::Private(false),
             ],
         )
-        .is_ok()
-    );
+        .is_ok());
 }
 
 #[test]
@@ -1261,7 +1261,10 @@ fn write_paths_materialize_class_default_booleans() {
     // The class defaults are materialized for the booleans the template omitted...
     assert_eq!(read(&secret, AttributeType::Token), Some(Attribute::Token(false)));
     assert_eq!(read(&secret, AttributeType::Private), Some(Attribute::Private(true)));
-    assert_eq!(read(&secret, AttributeType::Sensitive), Some(Attribute::Sensitive(true)));
+    assert_eq!(
+        read(&secret, AttributeType::Sensitive),
+        Some(Attribute::Sensitive(true))
+    );
     assert_eq!(
         read(&secret, AttributeType::Extractable),
         Some(Attribute::Extractable(false))
@@ -2023,17 +2026,9 @@ fn generate_key_pair_rejects_duplicate_attribute_types() {
     let session = user_session(&hsm);
 
     // Duplicate CKA_LABEL in the private half.
-    let dup = vec![
-        Attribute::Label(String::from("a")),
-        Attribute::Label(String::from("b")),
-    ];
+    let dup = vec![Attribute::Label(String::from("a")), Attribute::Label(String::from("b"))];
     assert!(matches!(
-        hsm.generate_key_pair(
-            session,
-            &Mechanism::EcKeyPairGen,
-            vec![],
-            dup,
-        ),
+        hsm.generate_key_pair(session, &Mechanism::EcKeyPairGen, vec![], dup,),
         Err(HsmError::TemplateInconsistent)
     ));
 }
