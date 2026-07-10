@@ -198,19 +198,31 @@ TODOs, roughly in dependency order:
       process, so any left behind is a crash orphan). Token objects
       (`CKA_TOKEN` true) are unaffected. Matches their PVW-5862 assumption
       that session objects die with the session.
-- [ ] **Validate `CKA_EC_PARAMS`** — nl-wallet passes the P-256 OID
-      explicitly; rustssm ignores the attribute and silently assumes P-256.
-      Reject other curves with `CKR_CURVE_NOT_SUPPORTED`.
+- [x] **Validate `CKA_EC_PARAMS`** — nl-wallet passes the P-256 OID
+      explicitly; rustssm now validates it rather than silently assuming
+      P-256. A supplied `CKA_EC_PARAMS` naming a curve other than secp256r1
+      is rejected with `CKR_CURVE_NOT_SUPPORTED` (`HsmError::CurveNotSupported`)
+      at both EC entry points: `create_object` (EC private-key import) and
+      `generate_key_pair` (`EcKeyPairGen`, validated on both halves). An
+      omitted `CKA_EC_PARAMS` is still fine — the P-256 OID is injected by
+      `merge_attributes` at write time. Covered by
+      `create_ec_private_key_rejects_unsupported_curve`,
+      `create_ec_private_key_accepts_explicit_p256_params`,
+      `generate_key_pair_rejects_unsupported_curve`, and
+      `generate_key_pair_accepts_explicit_p256_params`.
 - [ ] **ECDSA verify via private-key handle** — the `Pkcs11Client::verify`
       trait method allows `SigningMechanism::Ecdsa256` with a private-key
       handle (today nl-wallet only verifies HMACs). `C_VerifyInit` with
       `CKM_ECDSA` on a private key handle should derive the public key
       instead of failing.
-- [ ] **Attribute storage for unwrapped keys** — `unwrap_signing_key` passes
+- [x] **Attribute storage for unwrapped keys** — `unwrap_signing_key` passes
       a template (`CKA_CLASS`, `CKA_KEY_TYPE`, `CKA_TOKEN`, `CKA_PRIVATE`);
-      rustssm stores only the key bytes. Fine for the immediate
-      unwrap-then-sign flow, but attribute-aware `find_objects`/
-      `C_GetAttributeValue` (section 1) should include these objects.
+      rustssm now persists the full template like every other object-creating
+      path: `unwrap_key` runs its template through `merge_attributes`, so the
+      class/key-type/token/private flags (plus materialized class defaults)
+      are stored and served by `C_GetAttributeValue`/`C_FindObjects`. Covered
+      by `unwrap_drops_untracked_template_attributes` (proves an unwrapped key
+      is findable by its label).
 - [x] Point nl-wallet at rustssm for integration testing: set `library_path`
       in `wallet_core/lib/hsm/hsm.toml` to
       `.../rustssm/target/release/librustssm.so`, provision a token whose user

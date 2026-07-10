@@ -156,6 +156,9 @@ pub enum HsmError {
     #[error("encrypted data invalid")]
     EncryptedDataInvalid,
 
+    #[error("curve not supported")]
+    CurveNotSupported,
+
     #[error("object store unavailable: {0}")]
     ObjectStore(#[source] ObjectStoreError),
 
@@ -581,6 +584,8 @@ impl Hsm {
                     return Err(HsmError::TemplateInconsistent);
                 }
 
+                validate_ec_params(&attributes)?;
+
                 let value = value_attribute(&attributes)?;
                 let material = ec_private_key_material(&value)?;
 
@@ -747,6 +752,9 @@ impl Hsm {
                 Ok((public_id, private_id))
             }
             Mechanism::EcKeyPairGen => {
+                validate_ec_params(&public_key_attributes)?;
+                validate_ec_params(&private_key_attributes)?;
+
                 let signing_key = ecdsa::SigningKey::generate();
                 let private_bytes = signing_key.to_bytes().to_vec();
                 let verifying_key = *signing_key.verifying_key();
@@ -1409,6 +1417,21 @@ fn reject_duplicate_attribute_types(attributes: &[Attribute]) -> Result<()> {
     for attribute_type in attributes.iter().filter_map(Attribute::attribute_type) {
         if !seen.insert(attribute_type) {
             return Err(HsmError::TemplateInconsistent);
+        }
+    }
+    Ok(())
+}
+
+/// Validates a supplied `CKA_EC_PARAMS`: it must name the one curve rustssm
+/// supports (secp256r1). Other curves are rejected with
+/// `CKR_CURVE_NOT_SUPPORTED`. An omitted `CKA_EC_PARAMS` is fine — the
+/// P-256 OID is injected by `merge_attributes` at write time.
+fn validate_ec_params(attributes: &[Attribute]) -> Result<()> {
+    for attr in attributes {
+        if let Attribute::EcParams(params) = attr {
+            if params.as_slice() != SECP256R1_EC_PARAMS {
+                return Err(HsmError::CurveNotSupported);
+            }
         }
     }
     Ok(())

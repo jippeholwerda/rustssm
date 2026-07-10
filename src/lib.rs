@@ -113,6 +113,7 @@ fn rv_from(error: HsmError) -> raw::CK_RV {
         HsmError::DataLenRange => raw::CKR_DATA_LEN_RANGE,
         HsmError::EncryptedDataLenRange => raw::CKR_ENCRYPTED_DATA_LEN_RANGE,
         HsmError::EncryptedDataInvalid => raw::CKR_ENCRYPTED_DATA_INVALID,
+        HsmError::CurveNotSupported => raw::CKR_CURVE_NOT_SUPPORTED,
         HsmError::ObjectStore(_) => raw::CKR_DEVICE_ERROR,
         HsmError::GeneralError => raw::CKR_GENERAL_ERROR,
     }

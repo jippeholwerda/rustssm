@@ -1623,6 +1623,92 @@ fn create_private_key_rejects_non_ec_and_bad_scalars() {
 }
 
 #[test]
+fn create_ec_private_key_rejects_unsupported_curve() {
+    use crate::attribute::KeyType;
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // An EC private key with CKA_EC_PARAMS naming a curve other than secp256r1
+    // is rejected with CKR_CURVE_NOT_SUPPORTED. This is the secp384r1 OID.
+    let secp384r1 = [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::PrivateKey),
+                Attribute::KeyType(KeyType::Ec),
+                Attribute::EcParams(secp384r1.to_vec()),
+                Attribute::Value(vec![0x42u8; 32]),
+            ],
+        ),
+        Err(HsmError::CurveNotSupported)
+    ));
+}
+
+#[test]
+fn create_ec_private_key_accepts_explicit_p256_params() {
+    use crate::attribute::KeyType;
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // nl-wallet passes the P-256 OID explicitly; that must succeed (the
+    // validation rejects only *other* curves, not the supported one).
+    let p256 = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    assert!(hsm
+        .create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::PrivateKey),
+                Attribute::KeyType(KeyType::Ec),
+                Attribute::EcParams(p256.to_vec()),
+                Attribute::Value(vec![0x42u8; 32]),
+                Attribute::Label(String::from("explicit-p256")),
+            ],
+        )
+        .is_ok());
+}
+
+#[test]
+fn generate_key_pair_rejects_unsupported_curve() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // The public half advertises secp384r1 while the mechanism generates
+    // P-256; the mismatch is caught before generation.
+    let secp384r1 = vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
+    assert!(matches!(
+        hsm.generate_key_pair(
+            session,
+            &Mechanism::EcKeyPairGen,
+            vec![Attribute::EcParams(secp384r1)],
+            vec![],
+        ),
+        Err(HsmError::CurveNotSupported)
+    ));
+}
+
+#[test]
+fn generate_key_pair_accepts_explicit_p256_params() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // Explicit P-256 OID in the public half is accepted.
+    let p256 = vec![0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    assert!(hsm
+        .generate_key_pair(
+            session,
+            &Mechanism::EcKeyPairGen,
+            vec![Attribute::EcParams(p256)],
+            vec![],
+        )
+        .is_ok());
+}
+
+#[test]
 fn create_token_object_in_read_only_session_is_rejected() {
     use crate::attribute::ObjectClass;
 
