@@ -561,10 +561,7 @@ pub unsafe extern "C" fn C_GenerateKey(
 
         let mechanism = unsafe { read_mechanism(pMechanism) }?;
         let attributes = unsafe { read_attributes(pTemplate, ulCount) };
-        debug!(
-            "C_GenerateKey mechanism: {:?}, attributes: {:?}",
-            &mechanism, &attributes
-        );
+        debug!("C_GenerateKey mechanism: {:?}, attributes: {:?}", mechanism, attributes);
 
         let object_id = HSM.generate_key(SessionId(hSession), &mechanism, attributes).ck()?;
 
@@ -602,7 +599,7 @@ pub unsafe extern "C" fn C_GenerateKeyPair(
         let private_key_attributes = unsafe { read_attributes(pPrivateKeyTemplate, ulPrivateKeyAttributeCount) };
         debug!(
             "C_GenerateKeyPair mechanism: {:?}, public attributes: {:?}, private attributes: {:?}",
-            &mechanism, &public_key_attributes, &private_key_attributes
+            mechanism, public_key_attributes, private_key_attributes
         );
 
         let (public_id, private_id) = HSM
@@ -821,7 +818,7 @@ pub unsafe extern "C" fn C_CreateObject(
         }
 
         let attributes = unsafe { read_attributes(pTemplate, ulCount) };
-        debug!("C_CreateObject attributes: {:?}", &attributes);
+        debug!("C_CreateObject attributes: {:?}", attributes);
 
         let object_id = HSM.create_object(SessionId(hSession), attributes).ck()?;
 
@@ -855,7 +852,7 @@ pub unsafe extern "C" fn C_CopyObject(
         }
 
         let attributes = unsafe { read_attributes(pTemplate, ulCount) };
-        debug!("C_CopyObject attributes: {:?}", &attributes);
+        debug!("C_CopyObject attributes: {:?}", attributes);
 
         let object_id = HSM.copy_object(SessionId(hSession), hObject.into(), attributes).ck()?;
 
@@ -885,7 +882,7 @@ pub unsafe extern "C" fn C_SetAttributeValue(
         }
 
         let attributes = unsafe { read_attributes(pTemplate, ulCount) };
-        debug!("C_SetAttributeValue attributes: {:?}", &attributes);
+        debug!("C_SetAttributeValue attributes: {:?}", attributes);
 
         // An unrecognized (untracked) attribute type parses as `Unknown`;
         // the domain rejects it as `CKR_ATTRIBUTE_TYPE_INVALID`.
