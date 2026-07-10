@@ -5,7 +5,6 @@ use log::info;
 use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
@@ -188,18 +187,11 @@ impl ObjectStore {
         Ok(ObjectId(connection.last_insert_rowid() as u64))
     }
 
-    pub fn read<T>(&self, object_id: &ObjectId) -> Result<T, ObjectStoreError>
-    where
-        T: DeserializeOwned,
-    {
+    /// Returns an object's stored attribute list together with its serialized
+    /// key material, in a single read.
+    pub fn read_parts(&self, object_id: &ObjectId) -> Result<(Vec<Attribute>, Vec<u8>), ObjectStoreError> {
         let record = self.read_record(object_id)?;
-        let object = postcard::from_bytes(&record.material).map_err(ObjectStoreError::Serialize)?;
-        Ok(object)
-    }
-
-    /// Returns the stored typed attribute list of an object.
-    pub fn read_attributes(&self, object_id: &ObjectId) -> Result<Vec<Attribute>, ObjectStoreError> {
-        Ok(self.read_record(object_id)?.attributes)
+        Ok((record.attributes, record.material))
     }
 
     /// Replaces an object's stored attribute list, preserving its key
@@ -457,7 +449,8 @@ mod tests {
             )
             .unwrap();
 
-        let stored_bytes: Vec<u8> = store.read(&id).unwrap();
+        let (_attributes, material) = store.read_parts(&id).unwrap();
+        let stored_bytes: Vec<u8> = postcard::from_bytes(&material).unwrap();
         let stored_key = ecdsa::SigningKey::from_slice(&stored_bytes).unwrap();
 
         assert_eq!(key, stored_key);

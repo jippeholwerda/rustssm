@@ -424,3 +424,29 @@ Ranked; being worked one at a time.
       directly via the store-level `write` to prove the guard, not just the
       construction invariant, is what blocks the match) and the existing
       `unwrap_drops_untracked_template_attributes` hsm-level test.
+- [x] **Witness-type refactor (Template / StoredAttributes / SessionContext)**
+      — parse-don't-validate: `Template::new` validates an application-supplied
+      attribute list (rejects `Unsupported` and duplicate attribute types in
+      one place), and `Template::merge` is the sole producer of
+      `StoredAttributes`, the only attribute list a session will persist — so
+      an object-creating path that skips validation or the merge does not
+      compile, rather than silently storing an unnormalized list. `SessionContext`
+      captures a session and a snapshot of its slot's login state under one
+      brief slot read lock; `ctx.object()` does one store read (attributes +
+      material) with §4.4 enforced, replacing the scattered `logged_in_as_user`
+      + `get_session` + `require_object_access` + `read_handle` pattern. Every
+      session-scoped entry point starts with `session_context`, which also
+      restores spec behavior: operations on an uninitialized HSM return
+      `NotInitialized` (the half-done refactor had regressed this to
+      `SessionNotFound` because `logged_in_as_user` didn't call
+      `ensure_initialized`). `apply_attribute_updates` shares the
+      `C_SetAttributeValue`/`C_CopyObject` update loop; `store_read_error`
+      replaces the repeated `SessionError`-to-`HsmError` match. `import_secret_key`
+      now delegates to `create_object` (the drift fix — previously it built its
+      own template and skipped `Template::merge`, so imported keys lacked class
+      defaults like `CKA_SENSITIVE`). `verify_init`'s ECDSA arm does one
+      `ctx.object` read and tries `material::<VerifyingKey>()` then falls back
+      to the scalar, instead of up to three separate reads. Covered by
+      `imported_key_carries_class_defaults` (CKA_SENSITIVE reads back true,
+      findable by a Sensitive(true) template) and the full existing suite (121
+      tests).

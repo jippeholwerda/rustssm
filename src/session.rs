@@ -6,6 +6,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::attribute::Attribute;
+use crate::attribute::StoredAttributes;
 use crate::object_store::ObjectId;
 use crate::object_store::ObjectStore;
 use crate::object_store::ObjectStoreError;
@@ -41,6 +42,25 @@ pub struct Session {
     objects: Arc<ObjectStore>,
     pub operation: OnceLock<Operation>,
     pub search_operation: OnceLock<SearchOperation>,
+}
+
+/// An object's stored attribute list together with its raw serialized key
+/// material, read from the store in one access. The material is decoded on
+/// demand, so callers that only need attributes pay no decode.
+pub struct ObjectParts {
+    pub attributes: Vec<Attribute>,
+    material: Vec<u8>,
+}
+
+impl ObjectParts {
+    /// Decodes the key material as `T`. `None` means the material is not a
+    /// `T` — for a handle-typed operation, a wrong-type key handle.
+    pub fn material<T>(&self) -> Option<T>
+    where
+        T: DeserializeOwned,
+    {
+        postcard::from_bytes(&self.material).ok()
+    }
 }
 
 #[derive(Default)]
@@ -85,37 +105,37 @@ impl Session {
         }
     }
 
-    pub fn write_object<T>(&self, object: &T, attributes: Vec<Attribute>) -> Result<ObjectId, SessionError>
+    pub fn write_object<T>(&self, object: &T, attributes: StoredAttributes) -> Result<ObjectId, SessionError>
     where
         T: Serialize + ?Sized,
     {
+        let attributes = attributes.into_vec();
         let owner = self.owner_for(&attributes);
         self.objects
             .write(attributes, object, owner)
             .map_err(SessionError::ObjectStore)
     }
 
-    pub fn read_object<T>(&self, object_id: &ObjectId) -> Result<T, SessionError>
-    where
-        T: DeserializeOwned,
-    {
-        self.objects.read(object_id).map_err(SessionError::ObjectStore)
+    /// Reads an object's attributes and key material in one store access.
+    pub fn read_object_parts(&self, object_id: &ObjectId) -> Result<ObjectParts, SessionError> {
+        let (attributes, material) = self.objects.read_parts(object_id).map_err(SessionError::ObjectStore)?;
+        Ok(ObjectParts { attributes, material })
     }
 
-    pub fn read_object_attributes(&self, object_id: &ObjectId) -> Result<Vec<Attribute>, SessionError> {
-        self.objects
-            .read_attributes(object_id)
-            .map_err(SessionError::ObjectStore)
-    }
-
-    pub fn set_object_attributes(&self, object_id: &ObjectId, attributes: Vec<Attribute>) -> Result<(), SessionError> {
+    pub fn set_object_attributes(
+        &self,
+        object_id: &ObjectId,
+        attributes: StoredAttributes,
+    ) -> Result<(), SessionError> {
+        let attributes = attributes.into_vec();
         let owner = self.owner_for(&attributes);
         self.objects
             .set_attributes(object_id, attributes, owner)
             .map_err(SessionError::ObjectStore)
     }
 
-    pub fn copy_object(&self, source: &ObjectId, attributes: Vec<Attribute>) -> Result<ObjectId, SessionError> {
+    pub fn copy_object(&self, source: &ObjectId, attributes: StoredAttributes) -> Result<ObjectId, SessionError> {
+        let attributes = attributes.into_vec();
         let owner = self.owner_for(&attributes);
         self.objects
             .copy(source, attributes, owner)

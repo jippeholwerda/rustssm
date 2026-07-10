@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
+use std::sync::RwLockReadGuard;
+use std::sync::RwLockWriteGuard;
 
 use aes_kw::KwpAes256;
 use der::asn1::OctetString;
@@ -17,13 +18,16 @@ use p256::ecdsa::VerifyingKey;
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
 use rsa::RsaPublicKey;
-use serde::de::DeserializeOwned;
 use thiserror::Error;
 
+use crate::attribute::default_boolean_attributes;
 use crate::attribute::Attribute;
 use crate::attribute::AttributeType;
 use crate::attribute::KeyType;
 use crate::attribute::ObjectClass;
+use crate::attribute::StoredAttributes;
+use crate::attribute::Template;
+use crate::attribute::TemplateError;
 use crate::mechanism::Mechanism;
 use crate::object_store::ObjectId;
 use crate::object_store::ObjectStore;
@@ -32,6 +36,7 @@ use crate::object_store::TokenRecord;
 use crate::operation::Operation;
 use crate::pin::Pin;
 use crate::pin::PinHash;
+use crate::session::ObjectParts;
 use crate::session::Session;
 use crate::session::SessionError;
 use crate::session::SessionId;
@@ -416,7 +421,7 @@ impl Hsm {
     }
 
     pub fn validate_session(&self, session_id: SessionId) -> Result<()> {
-        self.get_session(session_id).map(|_| ())
+        self.session_context(session_id).map(|_| ())
     }
 
     pub fn session_info(&self, session_id: SessionId) -> Result<SessionInfo> {
@@ -549,34 +554,28 @@ impl Hsm {
     /// the template attributes are persisted verbatim (minus `CKA_VALUE`, which
     /// becomes the key material) for later readback.
     pub fn create_object(&self, session_id: SessionId, attributes: Vec<Attribute>) -> Result<ObjectId> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let template = Template::new(attributes).map_err(template_error)?;
+        let class = template.class();
 
-        let class = attributes.iter().find_map(|attr| match attr {
-            Attribute::Class(class) => Some(*class),
-            _ => None,
-        });
-
-        reject_unsupported_attributes(&attributes)?;
-        reject_duplicate_attribute_types(&attributes)?;
-        require_login_to_create(&attributes, class, logged_in)?;
-        self.check_writable(&session, &attributes)?;
+        ctx.require_login_to_create(&template, class)?;
+        ctx.check_writable(template.attributes())?;
 
         match class {
             Some(ObjectClass::SecretKey) => {
-                let value = value_attribute(&attributes)?;
+                let value = value_attribute(template.attributes())?;
                 if value.is_empty() {
                     return Err(HsmError::AttributeValueInvalid);
                 }
 
-                let attributes = merge_attributes(attributes, vec![]);
+                let attributes = template.merge(vec![]);
+                let session = ctx.session();
                 session.write_object(&value, attributes).map_err(store_error)
             }
             Some(ObjectClass::PrivateKey) => {
                 // Only EC private keys are supported; the material is the P-256
                 // scalar, stored exactly as a generated EC private key is.
-                let key_type = attributes.iter().find_map(|attr| match attr {
+                let key_type = template.attributes().iter().find_map(|attr| match attr {
                     Attribute::KeyType(key_type) => Some(*key_type),
                     _ => None,
                 });
@@ -584,17 +583,19 @@ impl Hsm {
                     return Err(HsmError::TemplateInconsistent);
                 }
 
-                validate_ec_params(&attributes)?;
+                validate_ec_params(template.attributes())?;
 
-                let value = value_attribute(&attributes)?;
+                let value = value_attribute(template.attributes())?;
                 let material = ec_private_key_material(&value)?;
 
-                let attributes = merge_attributes(attributes, vec![]);
+                let attributes = template.merge(vec![]);
+                let session = ctx.session();
                 session.write_object(&material, attributes).map_err(store_error)
             }
             Some(ObjectClass::PublicKey) => {
-                let attributes = merge_attributes(attributes, vec![]);
+                let attributes = template.merge(vec![]);
                 let material: Vec<u8> = Vec::new();
+                let session = ctx.session();
                 session.write_object(&material, attributes).map_err(store_error)
             }
             Some(ObjectClass::Unknown) => Err(HsmError::TemplateInconsistent),
@@ -602,8 +603,10 @@ impl Hsm {
         }
     }
 
-    /// Imports raw key material as a labelled token secret key, the same way
-    /// a generated symmetric key is stored.
+    /// Imports raw key material as a labelled token secret key by delegating
+    /// to [`Self::create_object`] with the equivalent `C_CreateObject`
+    /// template, so imported keys go through the same validation, login
+    /// checks, class defaults and storage as any created object.
     pub fn import_secret_key(
         &self,
         session_id: SessionId,
@@ -611,24 +614,19 @@ impl Hsm {
         label: String,
         id: Option<Vec<u8>>,
     ) -> Result<ObjectId> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
-
         let mut attributes = vec![
             Attribute::Class(ObjectClass::SecretKey),
             Attribute::KeyType(KeyType::Aes),
             Attribute::Label(label),
             Attribute::Private(true),
             Attribute::Token(true),
+            Attribute::Value(key),
         ];
         if let Some(id) = id {
             attributes.push(Attribute::Id(id));
         }
-        require_login_for_private(&attributes, logged_in)?;
-        self.check_writable(&session, &attributes)?;
 
-        session.write_object(&key, attributes).map_err(store_error)
+        self.create_object(session_id, attributes)
     }
 
     pub fn generate_key(
@@ -637,20 +635,17 @@ impl Hsm {
         mechanism: &Mechanism,
         attributes: Vec<Attribute>,
     ) -> Result<ObjectId> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let template = Template::new(attributes).map_err(template_error)?;
 
-        reject_unsupported_attributes(&attributes)?;
-        reject_duplicate_attribute_types(&attributes)?;
         // A generated symmetric key is a secret key, which is private by
         // default, so creating one without login requires it (§4.4).
-        require_login_to_create(&attributes, Some(ObjectClass::SecretKey), logged_in)?;
-        self.check_writable(&session, &attributes)?;
+        ctx.require_login_to_create(&template, Some(ObjectClass::SecretKey))?;
+        ctx.check_writable(template.attributes())?;
 
         let (key_len, key_type) = match mechanism {
             Mechanism::GenericSecretKeyGen => {
-                let key_len = value_len(&attributes)?;
+                let key_len = value_len(template.attributes())?;
                 if key_len == 0 || key_len > MAX_SECRET_KEY_LENGTH {
                     return Err(HsmError::AttributeValueInvalid);
                 }
@@ -659,7 +654,7 @@ impl Hsm {
             Mechanism::AesKeyGen => {
                 // CKM_AES_KEY_GEN takes the key length from CKA_VALUE_LEN;
                 // AES defines exactly three key sizes.
-                let key_len = value_len(&attributes)?;
+                let key_len = value_len(template.attributes())?;
                 if !matches!(key_len, 16 | 24 | 32) {
                     return Err(HsmError::AttributeValueInvalid);
                 }
@@ -669,12 +664,12 @@ impl Hsm {
         };
 
         let key = random_bytes(key_len as usize);
-        let attributes = merge_attributes(
-            attributes,
-            vec![Attribute::Class(ObjectClass::SecretKey), Attribute::KeyType(key_type)],
-        );
-        let object_id = session.write_object(&key, attributes).map_err(store_error)?;
-        Ok(object_id)
+        let attributes = template.merge(vec![
+            Attribute::Class(ObjectClass::SecretKey),
+            Attribute::KeyType(key_type),
+        ]);
+        let session = ctx.session();
+        session.write_object(&key, attributes).map_err(store_error)
     }
 
     /// Generates a key pair, returning `(public, private)` object ids.
@@ -685,27 +680,21 @@ impl Hsm {
         public_key_attributes: Vec<Attribute>,
         private_key_attributes: Vec<Attribute>,
     ) -> Result<(ObjectId, ObjectId)> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
+        let ctx = self.session_context(session_id)?;
+        let public_template = Template::new(public_key_attributes).map_err(template_error)?;
+        let private_template = Template::new(private_key_attributes).map_err(template_error)?;
 
-        reject_unsupported_attributes(&public_key_attributes)?;
-        reject_duplicate_attribute_types(&public_key_attributes)?;
-        reject_unsupported_attributes(&private_key_attributes)?;
-        reject_duplicate_attribute_types(&private_key_attributes)?;
         // The private half is private by default, so generating a pair without
         // login is refused unless it is explicitly made public (§4.4).
-        require_login_to_create(&public_key_attributes, Some(ObjectClass::PublicKey), logged_in)?;
-        require_login_to_create(&private_key_attributes, Some(ObjectClass::PrivateKey), logged_in)?;
-
-        {
-            let session = session_lock.read().unwrap();
-            self.check_writable(&session, &public_key_attributes)?;
-            self.check_writable(&session, &private_key_attributes)?;
-        }
+        ctx.require_login_to_create(&public_template, Some(ObjectClass::PublicKey))?;
+        ctx.require_login_to_create(&private_template, Some(ObjectClass::PrivateKey))?;
+        ctx.check_writable(public_template.attributes())?;
+        ctx.check_writable(private_template.attributes())?;
 
         match mechanism {
             Mechanism::RsaPkcsKeyPairGen => {
-                let bits = public_key_attributes
+                let bits = public_template
+                    .attributes()
                     .iter()
                     .find_map(|attr| match attr {
                         Attribute::ModulusBits(bits) => Some(*bits),
@@ -723,25 +712,19 @@ impl Hsm {
                     RsaPrivateKey::new(&mut rng, bits as usize).map_err(|_| HsmError::AttributeValueInvalid)?;
                 let public_key = private_key.to_public_key();
 
-                let public_key_attributes = merge_attributes(
-                    public_key_attributes,
-                    vec![
-                        Attribute::Class(ObjectClass::PublicKey),
-                        Attribute::KeyType(KeyType::Rsa),
-                        Attribute::Modulus(public_key.n_bytes().to_vec()),
-                        Attribute::PublicExponent(public_key.e_bytes().to_vec()),
-                        Attribute::ModulusBits(public_key.n().bits() as u64),
-                    ],
-                );
-                let private_key_attributes = merge_attributes(
-                    private_key_attributes,
-                    vec![
-                        Attribute::Class(ObjectClass::PrivateKey),
-                        Attribute::KeyType(KeyType::Rsa),
-                    ],
-                );
+                let public_key_attributes = public_template.merge(vec![
+                    Attribute::Class(ObjectClass::PublicKey),
+                    Attribute::KeyType(KeyType::Rsa),
+                    Attribute::Modulus(public_key.n_bytes().to_vec()),
+                    Attribute::PublicExponent(public_key.e_bytes().to_vec()),
+                    Attribute::ModulusBits(public_key.n().bits() as u64),
+                ]);
+                let private_key_attributes = private_template.merge(vec![
+                    Attribute::Class(ObjectClass::PrivateKey),
+                    Attribute::KeyType(KeyType::Rsa),
+                ]);
 
-                let session = session_lock.read().unwrap();
+                let session = ctx.session();
                 let private_id = session
                     .write_object(&private_key, private_key_attributes)
                     .map_err(store_error)?;
@@ -752,31 +735,25 @@ impl Hsm {
                 Ok((public_id, private_id))
             }
             Mechanism::EcKeyPairGen => {
-                validate_ec_params(&public_key_attributes)?;
-                validate_ec_params(&private_key_attributes)?;
+                validate_ec_params(public_template.attributes())?;
+                validate_ec_params(private_template.attributes())?;
 
                 let signing_key = ecdsa::SigningKey::generate();
                 let private_bytes = signing_key.to_bytes().to_vec();
                 let verifying_key = *signing_key.verifying_key();
 
-                let public_key_attributes = merge_attributes(
-                    public_key_attributes,
-                    vec![
-                        Attribute::Class(ObjectClass::PublicKey),
-                        Attribute::KeyType(KeyType::Ec),
-                        Attribute::EcPoint(ec_point_der(&verifying_key)?),
-                        Attribute::EcParams(SECP256R1_EC_PARAMS.to_vec()),
-                    ],
-                );
-                let private_key_attributes = merge_attributes(
-                    private_key_attributes,
-                    vec![
-                        Attribute::Class(ObjectClass::PrivateKey),
-                        Attribute::KeyType(KeyType::Ec),
-                    ],
-                );
+                let public_key_attributes = public_template.merge(vec![
+                    Attribute::Class(ObjectClass::PublicKey),
+                    Attribute::KeyType(KeyType::Ec),
+                    Attribute::EcPoint(ec_point_der(&verifying_key)?),
+                    Attribute::EcParams(SECP256R1_EC_PARAMS.to_vec()),
+                ]);
+                let private_key_attributes = private_template.merge(vec![
+                    Attribute::Class(ObjectClass::PrivateKey),
+                    Attribute::KeyType(KeyType::Ec),
+                ]);
 
-                let session = session_lock.read().unwrap();
+                let session = ctx.session();
                 let private_id = session
                     .write_object(&private_bytes, private_key_attributes)
                     .map_err(store_error)?;
@@ -797,18 +774,18 @@ impl Hsm {
         wrapping_key: ObjectId,
         key: ObjectId,
     ) -> Result<Vec<u8>> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
 
-        require_object_access(&session, &wrapping_key, logged_in)?;
-        require_object_access(&session, &key, logged_in)?;
+        // §4.4 is enforced on both handles before the mechanism match,
+        // preserving the current precedence.
+        let wrapping_parts = ctx.object(&wrapping_key, HsmError::WrappingKeyHandleInvalid)?;
+        let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
 
         match mechanism {
             Mechanism::AesKeyWrapPad => {
                 let wrapping_key_bytes: Vec<u8> =
-                    read_handle(&session, &wrapping_key, HsmError::WrappingKeyHandleInvalid)?;
-                let key_bytes: Vec<u8> = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                    wrapping_parts.material().ok_or(HsmError::WrappingKeyHandleInvalid)?;
+                let key_bytes: Vec<u8> = key_parts.material().ok_or(HsmError::KeyHandleInvalid)?;
 
                 let kek = KwpAes256::new_from_slice(&wrapping_key_bytes).map_err(|_| HsmError::WrappingKeySizeRange)?;
 
@@ -832,24 +809,17 @@ impl Hsm {
         wrapped_key: &[u8],
         attributes: Vec<Attribute>,
     ) -> Result<ObjectId> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let template = Template::new(attributes).map_err(template_error)?;
 
-        let class = attributes.iter().find_map(|attr| match attr {
-            Attribute::Class(class) => Some(*class),
-            _ => None,
-        });
-
-        reject_unsupported_attributes(&attributes)?;
-        reject_duplicate_attribute_types(&attributes)?;
-        require_object_access(&session, &unwrapping_key, logged_in)?;
-        require_login_to_create(&attributes, class, logged_in)?;
+        let unwrapping_parts = ctx.object(&unwrapping_key, HsmError::UnwrappingKeyHandleInvalid)?;
+        ctx.require_login_to_create(&template, template.class())?;
 
         match mechanism {
             Mechanism::AesKeyWrapPad => {
-                let unwrapping_key_bytes: Vec<u8> =
-                    read_handle(&session, &unwrapping_key, HsmError::UnwrappingKeyHandleInvalid)?;
+                let unwrapping_key_bytes: Vec<u8> = unwrapping_parts
+                    .material()
+                    .ok_or(HsmError::UnwrappingKeyHandleInvalid)?;
 
                 let kek =
                     KwpAes256::new_from_slice(&unwrapping_key_bytes).map_err(|_| HsmError::UnwrappingKeySizeRange)?;
@@ -862,13 +832,9 @@ impl Hsm {
                     .map_err(|_| HsmError::WrappedKeyInvalid)?
                     .to_vec();
 
-                // Run the template through the same merge as every other
-                // object-creating path, so `Unknown`/`Unsupported`/`Value`
-                // attributes are dropped rather than persisted (a stored
-                // `Unknown` would spuriously match search templates).
-                let attributes = merge_attributes(attributes, vec![]);
-                let object_id = session.write_object(&key_bytes, attributes).map_err(store_error)?;
-                Ok(object_id)
+                let attributes = template.merge(vec![]);
+                let session = ctx.session();
+                session.write_object(&key_bytes, attributes).map_err(store_error)
             }
             _ => Err(HsmError::MechanismInvalid),
         }
@@ -877,23 +843,17 @@ impl Hsm {
     // ---- objects -----------------------------------------------------------
 
     pub fn destroy_object(&self, session_id: SessionId, object: ObjectId) -> Result<()> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
-
-        require_object_access(&session, &object, logged_in)?;
-
-        session.delete_object(&object).map_err(|error| match error {
-            SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
-                HsmError::ObjectStore(ObjectStoreError::Database(e))
-            }
-            _ => HsmError::ObjectHandleInvalid,
-        })
+        let ctx = self.session_context(session_id)?;
+        ctx.object(&object, HsmError::ObjectHandleInvalid)?;
+        let session = ctx.session();
+        session
+            .delete_object(&object)
+            .map_err(|error| store_read_error(error, HsmError::ObjectHandleInvalid))
     }
 
     pub fn object_exists(&self, session_id: SessionId, object: ObjectId) -> Result<bool> {
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let session = ctx.session();
         Ok(session.object_exists(&object))
     }
 
@@ -907,20 +867,10 @@ impl Hsm {
         object: ObjectId,
         attribute_type: AttributeType,
     ) -> Result<Option<Attribute>> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
-
-        let attributes = session.read_object_attributes(&object).map_err(|error| match error {
-            SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
-                HsmError::ObjectStore(ObjectStoreError::Database(e))
-            }
-            _ => HsmError::ObjectHandleInvalid,
-        })?;
-
-        require_login_for_private(&attributes, logged_in)?;
-
-        Ok(attributes
+        let ctx = self.session_context(session_id)?;
+        let parts = ctx.object(&object, HsmError::ObjectHandleInvalid)?;
+        Ok(parts
+            .attributes
             .into_iter()
             .find(|attr| attr.attribute_type() == Some(attribute_type)))
     }
@@ -935,34 +885,14 @@ impl Hsm {
         object: ObjectId,
         updates: Vec<Attribute>,
     ) -> Result<()> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
-
-        let mut attributes = session.read_object_attributes(&object).map_err(|error| match error {
-            SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
-                HsmError::ObjectStore(ObjectStoreError::Database(e))
-            }
-            _ => HsmError::ObjectHandleInvalid,
-        })?;
-
-        require_login_for_private(&attributes, logged_in)?;
-
-        let token_object = attributes.iter().any(|attr| matches!(attr, Attribute::Token(true)));
-        if token_object && matches!(session.state, SessionState::ReadOnly) {
-            return Err(HsmError::SessionReadOnly);
-        }
-
-        for update in updates {
-            let attribute_type = update.attribute_type().ok_or(HsmError::AttributeTypeInvalid)?;
-            if !attribute_type.is_modifiable() {
-                return Err(HsmError::AttributeReadOnly);
-            }
-            attributes.retain(|existing| existing.attribute_type() != Some(attribute_type));
-            attributes.push(update);
-        }
-
-        session.set_object_attributes(&object, attributes).map_err(store_error)
+        let ctx = self.session_context(session_id)?;
+        let mut attributes = ctx.object(&object, HsmError::ObjectHandleInvalid)?.attributes;
+        ctx.check_writable(&attributes)?;
+        apply_attribute_updates(&mut attributes, updates, false)?;
+        let session = ctx.session();
+        session
+            .set_object_attributes(&object, StoredAttributes::from_persisted(attributes))
+            .map_err(store_error)
     }
 
     /// Copies an object, applying a template of attribute overrides to the
@@ -972,58 +902,29 @@ impl Hsm {
     /// not be made non-sensitive and a non-extractable key may not be made
     /// extractable. The copy shares the source's key material.
     pub fn copy_object(&self, session_id: SessionId, source: ObjectId, overrides: Vec<Attribute>) -> Result<ObjectId> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
-
-        let mut attributes = session.read_object_attributes(&source).map_err(|error| match error {
-            SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
-                HsmError::ObjectStore(ObjectStoreError::Database(e))
-            }
-            _ => HsmError::ObjectHandleInvalid,
-        })?;
-
-        // Accessing a private source requires login (§4.4).
-        require_login_for_private(&attributes, logged_in)?;
-
-        reject_unsupported_attributes(&overrides)?;
-        reject_duplicate_attribute_types(&overrides)?;
-
-        for update in overrides {
-            let attribute_type = update.attribute_type().ok_or(HsmError::AttributeTypeInvalid)?;
-            if !attribute_type.is_modifiable() {
-                return Err(HsmError::AttributeReadOnly);
-            }
-            if forbidden_downgrade(&attributes, &update) {
-                return Err(HsmError::AttributeReadOnly);
-            }
-            attributes.retain(|existing| existing.attribute_type() != Some(attribute_type));
-            attributes.push(update);
-        }
-
-        // Creating a private copy also requires login (§4.4).
-        require_login_for_private(&attributes, logged_in)?;
-        // The copy may become a token object; that still needs a R/W session.
-        self.check_writable(&session, &attributes)?;
-
-        session.copy_object(&source, attributes).map_err(store_error)
+        let ctx = self.session_context(session_id)?;
+        let mut attributes = ctx.object(&source, HsmError::ObjectHandleInvalid)?.attributes;
+        let overrides = Template::new(overrides).map_err(template_error)?.into_vec();
+        apply_attribute_updates(&mut attributes, overrides, true)?;
+        require_login_for_private(&attributes, ctx.logged_in_as_user)?;
+        ctx.check_writable(&attributes)?;
+        let session = ctx.session();
+        session
+            .copy_object(&source, StoredAttributes::from_persisted(attributes))
+            .map_err(store_error)
     }
 
     pub fn find_objects_init(&self, session_id: SessionId, attributes: Vec<Attribute>) -> Result<()> {
-        // A session not logged in as the normal user may not see private
-        // objects (PKCS#11 §4.4), so they are excluded from the search.
-        let include_private = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
-
+        let ctx = self.session_context(session_id)?;
+        let session = ctx.session();
         session
-            .init_search(attributes, include_private)
+            .init_search(attributes, ctx.logged_in_as_user)
             .map_err(|_| HsmError::OperationActive)
     }
 
     pub fn find_objects_next(&self, session_id: SessionId, max_count: usize) -> Result<Vec<ObjectId>> {
-        let session_lock = self.get_session(session_id)?;
-        let mut session = session_lock.write().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let mut session = ctx.session_mut();
 
         if !session.is_search_active() {
             return Err(HsmError::OperationNotInitialized);
@@ -1041,41 +942,38 @@ impl Hsm {
     }
 
     pub fn find_objects_final(&self, session_id: SessionId) -> Result<()> {
-        let session_lock = self.get_session(session_id)?;
-        let mut session = session_lock.write().unwrap();
-
+        let ctx = self.session_context(session_id)?;
+        let mut session = ctx.session_mut();
         session.finish_search().map_err(|_| HsmError::OperationNotInitialized)
     }
 
     // ---- sign / verify / encrypt --------------------------------------------
 
     pub fn sign_init(&self, session_id: SessionId, mechanism: &Mechanism, key: ObjectId) -> Result<()> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
 
-        if session.operation.get().is_some() {
+        if ctx.session().operation.get().is_some() {
             return Err(HsmError::OperationActive);
         }
 
-        require_object_access(&session, &key, logged_in)?;
+        let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
 
         let operation = match mechanism {
             Mechanism::RsaPkcs => {
-                let private_key: RsaPrivateKey = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                let private_key: RsaPrivateKey = key_parts.material().ok_or(HsmError::KeyHandleInvalid)?;
                 Operation::SignRsa {
                     private_key: Box::new(private_key),
                 }
             }
             Mechanism::Ecdsa => {
-                let key_bytes: Vec<u8> = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                let key_bytes: Vec<u8> = key_parts.material().ok_or(HsmError::KeyHandleInvalid)?;
                 let signing_key = ecdsa::SigningKey::from_slice(&key_bytes).map_err(|_| HsmError::KeyHandleInvalid)?;
                 Operation::SignEcdsa {
                     signing_key: Box::new(signing_key),
                 }
             }
             Mechanism::Sha256Hmac => {
-                let key_bytes: Vec<u8> = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                let key_bytes: Vec<u8> = key_parts.material().ok_or(HsmError::KeyHandleInvalid)?;
                 let signing_key = HmacSha256::new_from_slice(&key_bytes).map_err(|_| HsmError::KeyHandleInvalid)?;
                 Operation::SignSha256Hmac {
                     signing_key: Box::new(signing_key),
@@ -1084,14 +982,15 @@ impl Hsm {
             _ => return Err(HsmError::MechanismInvalid),
         };
 
+        let session = ctx.session();
         session.operation.set(operation).map_err(|_| HsmError::OperationActive)
     }
 
     /// Length of the signature the active sign operation will produce. Does
     /// not consume the operation.
     pub fn signature_length(&self, session_id: SessionId) -> Result<u64> {
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let session = ctx.session();
 
         let operation = session.operation.get().ok_or(HsmError::OperationNotInitialized)?;
         if !operation.is_sign() {
@@ -1103,8 +1002,8 @@ impl Hsm {
 
     /// Signs `data`, consuming the active sign operation.
     pub fn sign(&self, session_id: SessionId, data: &[u8]) -> Result<Vec<u8>> {
-        let session_lock = self.get_session(session_id)?;
-        let mut session = session_lock.write().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let mut session = ctx.session_mut();
 
         if !session.operation.get().is_some_and(Operation::is_sign) {
             return Err(HsmError::OperationNotInitialized);
@@ -1117,19 +1016,17 @@ impl Hsm {
     }
 
     pub fn verify_init(&self, session_id: SessionId, mechanism: &Mechanism, key: ObjectId) -> Result<()> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
 
-        if session.operation.get().is_some() {
+        if ctx.session().operation.get().is_some() {
             return Err(HsmError::OperationActive);
         }
 
-        require_object_access(&session, &key, logged_in)?;
+        let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
 
         let operation = match mechanism {
             Mechanism::RsaPkcs => {
-                let public_key: RsaPublicKey = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                let public_key: RsaPublicKey = key_parts.material().ok_or(HsmError::KeyHandleInvalid)?;
                 Operation::VerifyRsa {
                     public_key: Box::new(public_key),
                 }
@@ -1137,23 +1034,23 @@ impl Hsm {
             Mechanism::Ecdsa => {
                 // A public-key handle stores the `VerifyingKey` directly; a
                 // private-key handle stores the P-256 scalar, so the public
-                // key is derived from it.
-                let verifying_key = match read_handle::<VerifyingKey>(&session, &key, HsmError::KeyHandleInvalid) {
-                    Ok(vk) => vk,
-                    Err(HsmError::KeyHandleInvalid) => {
-                        let key_bytes: Vec<u8> = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                // key is derived from it. Both reads come from the single
+                // `ctx.object` call above.
+                let verifying_key = match key_parts.material::<VerifyingKey>() {
+                    Some(vk) => vk,
+                    None => {
+                        let key_bytes: Vec<u8> = key_parts.material().ok_or(HsmError::KeyHandleInvalid)?;
                         let signing_key =
                             ecdsa::SigningKey::from_slice(&key_bytes).map_err(|_| HsmError::KeyHandleInvalid)?;
                         *signing_key.verifying_key()
                     }
-                    Err(e) => return Err(e),
                 };
                 Operation::VerifyEcdsa {
                     verifying_key: Box::new(verifying_key),
                 }
             }
             Mechanism::Sha256Hmac => {
-                let key_bytes: Vec<u8> = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                let key_bytes: Vec<u8> = key_parts.material().ok_or(HsmError::KeyHandleInvalid)?;
                 let verifying_key = HmacSha256::new_from_slice(&key_bytes).map_err(|_| HsmError::KeyHandleInvalid)?;
                 Operation::VerifySha256Hmac {
                     verifying_key: Box::new(verifying_key),
@@ -1162,13 +1059,14 @@ impl Hsm {
             _ => return Err(HsmError::MechanismInvalid),
         };
 
+        let session = ctx.session();
         session.operation.set(operation).map_err(|_| HsmError::OperationActive)
     }
 
     /// Verifies `signature` over `data`, consuming the active verify operation.
     pub fn verify(&self, session_id: SessionId, data: &[u8], signature: &[u8]) -> Result<()> {
-        let session_lock = self.get_session(session_id)?;
-        let mut session = session_lock.write().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let mut session = ctx.session_mut();
 
         if !session.operation.get().is_some_and(Operation::is_verify) {
             return Err(HsmError::OperationNotInitialized);
@@ -1183,26 +1081,25 @@ impl Hsm {
     }
 
     pub fn encrypt_init(&self, session_id: SessionId, mechanism: &Mechanism, key: ObjectId) -> Result<()> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
 
-        if session.operation.get().is_some() {
+        if ctx.session().operation.get().is_some() {
             return Err(HsmError::OperationActive);
         }
 
-        require_object_access(&session, &key, logged_in)?;
+        let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
 
         match mechanism {
             Mechanism::AesGcm {
                 initialization_vector,
                 additional_authenticated_data,
             } => {
-                let key_bytes: Vec<u8> = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                let key_bytes: Vec<u8> = key_parts.material().ok_or(HsmError::KeyHandleInvalid)?;
                 if !matches!(key_bytes.len(), 16 | 32) {
                     return Err(HsmError::KeySizeRange);
                 }
 
+                let session = ctx.session();
                 session
                     .operation
                     .set(Operation::EncryptAesGcm {
@@ -1219,8 +1116,8 @@ impl Hsm {
     /// Length of the ciphertext the active encrypt operation will produce for
     /// `data_length` bytes of plaintext. Does not consume the operation.
     pub fn encrypted_length(&self, session_id: SessionId, data_length: u64) -> Result<u64> {
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let session = ctx.session();
 
         if !session.operation.get().is_some_and(Operation::is_encrypt) {
             return Err(HsmError::OperationNotInitialized);
@@ -1233,8 +1130,8 @@ impl Hsm {
 
     /// Encrypts `data`, consuming the active encrypt operation.
     pub fn encrypt(&self, session_id: SessionId, data: &[u8]) -> Result<Vec<u8>> {
-        let session_lock = self.get_session(session_id)?;
-        let mut session = session_lock.write().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let mut session = ctx.session_mut();
 
         if !session.operation.get().is_some_and(Operation::is_encrypt) {
             return Err(HsmError::OperationNotInitialized);
@@ -1245,26 +1142,25 @@ impl Hsm {
     }
 
     pub fn decrypt_init(&self, session_id: SessionId, mechanism: &Mechanism, key: ObjectId) -> Result<()> {
-        let logged_in = self.logged_in_as_user(session_id)?;
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
 
-        if session.operation.get().is_some() {
+        if ctx.session().operation.get().is_some() {
             return Err(HsmError::OperationActive);
         }
 
-        require_object_access(&session, &key, logged_in)?;
+        let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
 
         match mechanism {
             Mechanism::AesGcm {
                 initialization_vector,
                 additional_authenticated_data,
             } => {
-                let key_bytes: Vec<u8> = read_handle(&session, &key, HsmError::KeyHandleInvalid)?;
+                let key_bytes: Vec<u8> = key_parts.material().ok_or(HsmError::KeyHandleInvalid)?;
                 if !matches!(key_bytes.len(), 16 | 32) {
                     return Err(HsmError::KeySizeRange);
                 }
 
+                let session = ctx.session();
                 session
                     .operation
                     .set(Operation::DecryptAesGcm {
@@ -1283,8 +1179,8 @@ impl Hsm {
     /// operation. AES-GCM ciphertext carries a trailing tag, so anything
     /// shorter than the tag cannot be valid.
     pub fn decrypted_length(&self, session_id: SessionId, data_length: u64) -> Result<u64> {
-        let session_lock = self.get_session(session_id)?;
-        let session = session_lock.read().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let session = ctx.session();
 
         if !session.operation.get().is_some_and(Operation::is_decrypt) {
             return Err(HsmError::OperationNotInitialized);
@@ -1297,8 +1193,8 @@ impl Hsm {
 
     /// Decrypts `data`, consuming the active decrypt operation.
     pub fn decrypt(&self, session_id: SessionId, data: &[u8]) -> Result<Vec<u8>> {
-        let session_lock = self.get_session(session_id)?;
-        let mut session = session_lock.write().unwrap();
+        let ctx = self.session_context(session_id)?;
+        let mut session = ctx.session_mut();
 
         if !session.operation.get().is_some_and(Operation::is_decrypt) {
             return Err(HsmError::OperationNotInitialized);
@@ -1309,27 +1205,6 @@ impl Hsm {
     }
 
     // ---- internals -----------------------------------------------------------
-
-    fn check_writable(&self, session: &Session, attributes: &[Attribute]) -> Result<()> {
-        let token_object = attributes.iter().any(|attr| matches!(attr, Attribute::Token(true)));
-        if token_object && matches!(session.state, SessionState::ReadOnly) {
-            return Err(HsmError::SessionReadOnly);
-        }
-        Ok(())
-    }
-
-    /// Whether the session's slot is currently logged in as the normal user.
-    /// Private objects (`CKA_PRIVATE`) may only be created or accessed while it
-    /// is (PKCS#11 §4.4). Fetched via its own brief slot lock so callers can
-    /// capture it *before* taking the session lock — the lock order is
-    /// slot→session, so the slot lock must never nest inside a session lock.
-    fn logged_in_as_user(&self, session_id: SessionId) -> Result<bool> {
-        let slot_lock = self
-            .find_by_session_id(session_id)
-            .ok_or(HsmError::SessionNotFound(session_id))?;
-        let logged_in = slot_lock.read().unwrap().current_user_type == Some(UserType::User);
-        Ok(logged_in)
-    }
 
     fn get_slot(&self, slot_id: &SlotId) -> Result<Arc<RwLock<Slot>>> {
         self.ensure_initialized()?;
@@ -1348,9 +1223,11 @@ impl Hsm {
 
     fn get_session_and_slot(&self, session_id: SessionId) -> Result<SessionAndSlot> {
         self.ensure_initialized()?;
+
         let slot_lock = self
             .find_by_session_id(session_id)
             .ok_or(HsmError::SessionNotFound(session_id))?;
+
         let session = slot_lock
             .read()
             .unwrap()
@@ -1360,27 +1237,135 @@ impl Hsm {
             .get(&session_id)
             .cloned()
             .ok_or(HsmError::SessionNotFound(session_id))?;
+
         Ok((session, slot_lock))
     }
 
-    fn get_session(&self, session_id: SessionId) -> Result<Arc<RwLock<Session>>> {
-        self.get_session_and_slot(session_id).map(|(session, _slot)| session)
+    /// Resolves a session id to its session plus a snapshot of its slot's login
+    /// state. Every session-scoped entry point starts here.
+    fn session_context(&self, session_id: SessionId) -> Result<SessionContext> {
+        self.ensure_initialized()?;
+
+        let slot_lock = self
+            .find_by_session_id(session_id)
+            .ok_or(HsmError::SessionNotFound(session_id))?;
+
+        let slot = slot_lock.read().unwrap();
+
+        let session = slot
+            .sessions
+            .read()
+            .unwrap()
+            .get(&session_id)
+            .cloned()
+            .ok_or(HsmError::SessionNotFound(session_id))?;
+
+        Ok(SessionContext {
+            session,
+            logged_in_as_user: slot.current_user_type == Some(UserType::User),
+        })
     }
 }
 
-/// Reads an object, mapping "not found" and "wrong type" onto the
-/// context-specific invalid-handle error while letting database failures
-/// surface as such.
-fn read_handle<T>(session: &Session, object_id: &ObjectId, invalid: HsmError) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    session.read_object(object_id).map_err(|error| match error {
+/// The single place `TemplateError` meets `HsmError`.
+fn template_error(error: TemplateError) -> HsmError {
+    match error {
+        TemplateError::UnsupportedAttribute => HsmError::AttributeTypeInvalid,
+        TemplateError::DuplicateAttributeType => HsmError::TemplateInconsistent,
+    }
+}
+
+/// Handle database failures if applicable, anything else becomes the
+/// context-specific invalid-handle error.
+fn store_read_error(error: SessionError, invalid: HsmError) -> HsmError {
+    match error {
         SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
             HsmError::ObjectStore(ObjectStoreError::Database(e))
         }
         _ => invalid,
-    })
+    }
+}
+
+/// Shared `C_SetAttributeValue`/`C_CopyObject` update loop; `enforce_one_way`
+/// adds the sensitive/extractable one-way guarantees (copy only — preserves
+/// current `set_object_attributes` behavior, which does not enforce them).
+fn apply_attribute_updates(
+    attributes: &mut Vec<Attribute>,
+    updates: Vec<Attribute>,
+    enforce_one_way: bool,
+) -> Result<()> {
+    for update in updates {
+        let attribute_type = update.attribute_type().ok_or(HsmError::AttributeTypeInvalid)?;
+
+        if !attribute_type.is_modifiable() {
+            return Err(HsmError::AttributeReadOnly);
+        }
+
+        if enforce_one_way && forbidden_downgrade(attributes, &update) {
+            return Err(HsmError::AttributeReadOnly);
+        }
+
+        attributes.retain(|existing| existing.attribute_type() != Some(attribute_type));
+        attributes.push(update);
+    }
+
+    Ok(())
+}
+
+/// A session together with a snapshot of its slot's login state, captured
+/// before any session lock (lock order is slot→session).
+///
+/// Methods that take the session lock themselves (`object`, `check_writable`)
+/// must NOT be called while a guard from `session()`/`session_mut()` is
+/// alive — a second read of the same `RwLock` can deadlock behind a queued
+/// writer.
+struct SessionContext {
+    session: Arc<RwLock<Session>>,
+    /// Login state when the call entered the domain; §4.4 gates private
+    /// objects on it.
+    logged_in_as_user: bool,
+}
+
+impl SessionContext {
+    fn session(&self) -> RwLockReadGuard<'_, Session> {
+        self.session.read().unwrap()
+    }
+
+    fn session_mut(&self) -> RwLockWriteGuard<'_, Session> {
+        self.session.write().unwrap()
+    }
+
+    /// One store read: attributes + material, with §4.4 enforced. "Not
+    /// found"/"wrong shape" map onto the context-specific `invalid` error.
+    fn object(&self, object_id: &ObjectId, invalid: HsmError) -> Result<ObjectParts> {
+        let parts = self
+            .session()
+            .read_object_parts(object_id)
+            .map_err(|error| store_read_error(error, invalid))?;
+
+        require_login_for_private(&parts.attributes, self.logged_in_as_user)?;
+
+        Ok(parts)
+    }
+
+    fn require_login_to_create(&self, template: &Template, class: Option<ObjectClass>) -> Result<()> {
+        if !self.logged_in_as_user && effective_private(template.attributes(), class) {
+            return Err(HsmError::UserNotLoggedIn);
+        }
+
+        Ok(())
+    }
+
+    /// A token object (`CKA_TOKEN` true) needs a read/write session.
+    fn check_writable(&self, attributes: &[Attribute]) -> Result<()> {
+        let token_object = attributes.iter().any(|attr| matches!(attr, Attribute::Token(true)));
+
+        if token_object && matches!(self.session().state, SessionState::ReadOnly) {
+            return Err(HsmError::SessionReadOnly);
+        }
+
+        Ok(())
+    }
 }
 
 /// Reads `CKA_VALUE_LEN` (the secret-key length in bytes) from a template,
@@ -1406,38 +1391,10 @@ fn store_error(error: SessionError) -> HsmError {
 /// `CKA_EC_PARAMS` for every EC key this token produces.
 const SECP256R1_EC_PARAMS: [u8; 10] = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 
-/// Rejects a creation/generation template that carries a token-managed,
-/// read-only attribute (`CKA_UNIQUE_ID` and friends, parsed as
-/// [`Attribute::Unsupported`]). Following SoftHSM, rustssm does not support
-/// these attributes, so supplying one is a type error rather than a silent
-/// no-op.
-fn reject_unsupported_attributes(attributes: &[Attribute]) -> Result<()> {
-    if attributes.iter().any(|attr| matches!(attr, Attribute::Unsupported)) {
-        return Err(HsmError::AttributeTypeInvalid);
-    }
-    Ok(())
-}
-
-/// Rejects a creation/generation template that carries the same attribute
-/// type more than once. PKCS#11 leaves the behaviour for duplicates up to the
-/// token; conflicting duplicates are `CKR_TEMPLATE_INCONSISTENT`. rustssm
-/// treats any repetition as inconsistent so readback and search stay
-/// single-valued, matching the one-attribute-per-type invariant that
-/// [`set_object_attributes`] relies on when it does retain-then-push.
-fn reject_duplicate_attribute_types(attributes: &[Attribute]) -> Result<()> {
-    let mut seen = HashSet::new();
-    for attribute_type in attributes.iter().filter_map(Attribute::attribute_type) {
-        if !seen.insert(attribute_type) {
-            return Err(HsmError::TemplateInconsistent);
-        }
-    }
-    Ok(())
-}
-
 /// Validates a supplied `CKA_EC_PARAMS`: it must name the one curve rustssm
 /// supports (secp256r1). Other curves are rejected with
 /// `CKR_CURVE_NOT_SUPPORTED`. An omitted `CKA_EC_PARAMS` is fine — the
-/// P-256 OID is injected by `merge_attributes` at write time.
+/// P-256 OID is injected as a derived attribute at write time.
 fn validate_ec_params(attributes: &[Attribute]) -> Result<()> {
     for attr in attributes {
         if let Attribute::EcParams(params) = attr {
@@ -1467,8 +1424,8 @@ fn require_login_for_private(attributes: &[Attribute], logged_in_as_user: bool) 
 
 /// Whether an object created from `template` for `class` ends up private,
 /// accounting for the `CKA_PRIVATE` class default materialized when the
-/// template omits it (see [`default_boolean_attributes`]). An explicit
-/// template value wins; otherwise the class default decides.
+/// template omits it. An explicit template value wins; otherwise the class
+/// default decides.
 fn effective_private(template: &[Attribute], class: Option<ObjectClass>) -> bool {
     if let Some(explicit) = template.iter().find_map(|attr| match attr {
         Attribute::Private(value) => Some(*value),
@@ -1477,32 +1434,6 @@ fn effective_private(template: &[Attribute], class: Option<ObjectClass>) -> bool
         return explicit;
     }
     class.is_some_and(|class| is_private(&default_boolean_attributes(class)))
-}
-
-/// Enforces §4.4 at object creation: a session not logged in as the normal user
-/// may not create a private object. Unlike [`require_login_for_private`], which
-/// inspects an already-complete attribute list, this reads the effective
-/// `CKA_PRIVATE` — so a key that is private only by its class default is gated
-/// too, matching SoftHSM (which applies the default before the check).
-fn require_login_to_create(template: &[Attribute], class: Option<ObjectClass>, logged_in_as_user: bool) -> Result<()> {
-    if !logged_in_as_user && effective_private(template, class) {
-        return Err(HsmError::UserNotLoggedIn);
-    }
-    Ok(())
-}
-
-/// Enforces §4.4 for accessing an existing object by handle when its
-/// attributes are not otherwise read: a private object requires the normal
-/// user. An unreadable handle falls through so the operation's own handle
-/// validation reports it.
-fn require_object_access(session: &Session, object: &ObjectId, logged_in_as_user: bool) -> Result<()> {
-    if logged_in_as_user {
-        return Ok(());
-    }
-    match session.read_object_attributes(object) {
-        Ok(attributes) => require_login_for_private(&attributes, logged_in_as_user),
-        Err(_) => Ok(()),
-    }
 }
 
 /// Whether applying `update` to an object carrying `current` attributes would
@@ -1514,91 +1445,6 @@ fn forbidden_downgrade(current: &[Attribute], update: &Attribute) -> bool {
         Attribute::Extractable(true) => current.iter().any(|attr| matches!(attr, Attribute::Extractable(false))),
         _ => false,
     }
-}
-
-/// Merges token-synthesized/derived attributes into an application template, producing the attribute list persisted
-/// with the object. `CKA_VALUE` (the key material) and unrecognized attributes are dropped; each derived attribute and
-/// each class default is added only when the template does not already carry that type, so the application's choice
-/// wins. Every boolean attribute the object's class defines is present, so `ObjectStore::search` stays a plain
-/// presence-plus-equality match (a template like `CKA_PRIVATE = false` matches an object whose template never mentioned
-/// it, as it would against SoftHSM).
-fn merge_attributes(mut attributes: Vec<Attribute>, derived: Vec<Attribute>) -> Vec<Attribute> {
-    attributes.retain(|attr| !matches!(attr, Attribute::Value(_) | Attribute::Unknown | Attribute::Unsupported));
-
-    add_absent(&mut attributes, derived);
-
-    // The class is now settled (from the template or the derived list), so
-    // materialize the spec/token defaults for the boolean attributes the
-    // template left unset.
-    if let Some(class) = attributes.iter().find_map(|attr| match attr {
-        Attribute::Class(class) => Some(*class),
-        _ => None,
-    }) {
-        add_absent(&mut attributes, default_boolean_attributes(class));
-    }
-
-    attributes
-}
-
-/// Appends each of `additions` to `attributes` only if `attributes` does not
-/// already carry an attribute of that type, so an application-supplied value
-/// is never overwritten by a derived or default one.
-fn add_absent(attributes: &mut Vec<Attribute>, additions: Vec<Attribute>) {
-    for attribute in additions {
-        let already_present = attribute.attribute_type().is_some_and(|type_| {
-            attributes
-                .iter()
-                .any(|existing| existing.attribute_type() == Some(type_))
-        });
-        if !already_present {
-            attributes.push(attribute);
-        }
-    }
-}
-
-/// The boolean-attribute defaults that are used at object creation when
-/// the template omits them, keyed by object class. PKCS#11 fixes only
-/// `CKA_TOKEN` and `CKA_DERIVE` (both false); the rest are token-specific, and
-/// these are rustssm's documented choices — key material is private and
-/// sensitive by default, and usage flags are opt-in (an application enables the
-/// operations it needs). Applying these makes the stored attribute set complete
-/// so search and readback behave like SoftHSM's.
-fn default_boolean_attributes(class: ObjectClass) -> Vec<Attribute> {
-    // `CKA_TOKEN` (session object) is common to every storage object.
-    let mut defaults = vec![Attribute::Token(false), Attribute::Derive(false)];
-
-    match class {
-        ObjectClass::PublicKey => defaults.extend([
-            Attribute::Private(false),
-            Attribute::Encrypt(false),
-            Attribute::Verify(false),
-            Attribute::Wrap(false),
-        ]),
-        ObjectClass::PrivateKey => defaults.extend([
-            Attribute::Private(true),
-            Attribute::Sensitive(true),
-            Attribute::Extractable(false),
-            Attribute::Decrypt(false),
-            Attribute::Sign(false),
-            Attribute::Unwrap(false),
-        ]),
-        ObjectClass::SecretKey => defaults.extend([
-            Attribute::Private(true),
-            Attribute::Sensitive(true),
-            Attribute::Extractable(false),
-            Attribute::Encrypt(false),
-            Attribute::Decrypt(false),
-            Attribute::Sign(false),
-            Attribute::Verify(false),
-            Attribute::Wrap(false),
-            Attribute::Unwrap(false),
-        ]),
-        // A classless object is degenerate (the creating path rejects unknown
-        // classes); leave it as-is rather than guess a key's defaults.
-        ObjectClass::Unknown => return Vec::new(),
-    }
-
-    defaults
 }
 
 /// Reads the `CKA_VALUE` bytes from a template, which key-object creation

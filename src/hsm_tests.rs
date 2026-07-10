@@ -544,7 +544,8 @@ fn generate_aes_key_produces_usable_key() {
             )
             .unwrap();
 
-        let key_bytes: Vec<u8> = hsm.object_store().unwrap().read(&key).unwrap();
+        let (_, material) = hsm.object_store().unwrap().read_parts(&key).unwrap();
+        let key_bytes: Vec<u8> = postcard::from_bytes(&material).unwrap();
         assert_eq!(key_bytes.len(), length as usize);
     }
 }
@@ -875,7 +876,8 @@ fn aes_gcm_encryption_matches_reference_implementation() {
     let session = user_session(&hsm);
     let key = generate_secret_key(&hsm, session, 32, "aes key");
 
-    let key_bytes: Vec<u8> = hsm.object_store().unwrap().read(&key).unwrap();
+    let (_, material) = hsm.object_store().unwrap().read_parts(&key).unwrap();
+    let key_bytes: Vec<u8> = postcard::from_bytes(&material).unwrap();
     let iv = [0x42u8; 12];
     let aad = b"header".to_vec();
     let plaintext = b"attack at dawn";
@@ -955,7 +957,8 @@ fn aes_gcm_with_32_byte_iv_roundtrips_and_matches_reference() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
     let key = generate_secret_key(&hsm, session, 32, "aes key");
-    let key_bytes: Vec<u8> = hsm.object_store().unwrap().read(&key).unwrap();
+    let (_, material) = hsm.object_store().unwrap().read_parts(&key).unwrap();
+    let key_bytes: Vec<u8> = postcard::from_bytes(&material).unwrap();
 
     let iv = [0x17u8; 32];
     let plaintext = b"attack at dawn";
@@ -1458,11 +1461,47 @@ fn create_secret_key_object_is_stored_and_usable() {
         .unwrap();
 
     // Stored verbatim and usable as an AES key.
-    let stored: Vec<u8> = hsm.object_store().unwrap().read(&object).unwrap();
+    let (_, material) = hsm.object_store().unwrap().read_parts(&object).unwrap();
+    let stored: Vec<u8> = postcard::from_bytes(&material).unwrap();
     assert_eq!(stored, key_bytes);
 
     hsm.find_objects_init(session, vec![Attribute::Label(String::from("created"))])
         .unwrap();
+    let found = hsm.find_objects_next(session, 10).unwrap();
+    hsm.find_objects_final(session).unwrap();
+    assert_eq!(found, vec![object]);
+}
+
+#[test]
+fn imported_key_carries_class_defaults() {
+    // import_secret_key delegates to create_object, which runs the template
+    // through Template::merge — so the stored object carries class defaults
+    // (CKA_SENSITIVE = true, CKA_EXTRACTABLE = false, …) even though the
+    // import template never mentioned them. This pins the drift fix: the old
+    // import path stored the raw template and skipped merge.
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let key_bytes = vec![0x7Fu8; 32];
+    let object = hsm
+        .import_secret_key(session, key_bytes, String::from("imported"), None)
+        .unwrap();
+
+    // CKA_SENSITIVE reads back true (the SecretKey class default).
+    assert_eq!(
+        hsm.object_attribute(session, object.clone(), AttributeType::Sensitive)
+            .unwrap(),
+        Some(Attribute::Sensitive(true))
+    );
+
+    // The key is findable by a Sensitive(true) template — search is a plain
+    // presence-and-equality match, and the default was materialized at write
+    // time, not synthesized at search time.
+    hsm.find_objects_init(
+        session,
+        vec![Attribute::Sensitive(true), Attribute::Label(String::from("imported"))],
+    )
+    .unwrap();
     let found = hsm.find_objects_next(session, 10).unwrap();
     hsm.find_objects_final(session).unwrap();
     assert_eq!(found, vec![object]);
@@ -2034,8 +2073,10 @@ fn copy_object_duplicates_material_and_applies_overrides() {
         .unwrap();
     assert_ne!(copy, source);
 
-    let source_material: Vec<u8> = hsm.object_store().unwrap().read(&source).unwrap();
-    let copy_material: Vec<u8> = hsm.object_store().unwrap().read(&copy).unwrap();
+    let (_, source_material_bytes) = hsm.object_store().unwrap().read_parts(&source).unwrap();
+    let source_material: Vec<u8> = postcard::from_bytes(&source_material_bytes).unwrap();
+    let (_, copy_material_bytes) = hsm.object_store().unwrap().read_parts(&copy).unwrap();
+    let copy_material: Vec<u8> = postcard::from_bytes(&copy_material_bytes).unwrap();
     assert_eq!(source_material, copy_material);
 
     assert_eq!(
