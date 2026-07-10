@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -555,6 +556,7 @@ impl Hsm {
         });
 
         reject_unsupported_attributes(&attributes)?;
+        reject_duplicate_attribute_types(&attributes)?;
         require_login_to_create(&attributes, class, logged_in)?;
         self.check_writable(&session, &attributes)?;
 
@@ -635,6 +637,7 @@ impl Hsm {
         let session = session_lock.read().unwrap();
 
         reject_unsupported_attributes(&attributes)?;
+        reject_duplicate_attribute_types(&attributes)?;
         // A generated symmetric key is a secret key, which is private by
         // default, so creating one without login requires it (§4.4).
         require_login_to_create(&attributes, Some(ObjectClass::SecretKey), logged_in)?;
@@ -681,7 +684,9 @@ impl Hsm {
         let session_lock = self.get_session(session_id)?;
 
         reject_unsupported_attributes(&public_key_attributes)?;
+        reject_duplicate_attribute_types(&public_key_attributes)?;
         reject_unsupported_attributes(&private_key_attributes)?;
+        reject_duplicate_attribute_types(&private_key_attributes)?;
         // The private half is private by default, so generating a pair without
         // login is refused unless it is explicitly made public (§4.4).
         require_login_to_create(&public_key_attributes, Some(ObjectClass::PublicKey), logged_in)?;
@@ -829,6 +834,7 @@ impl Hsm {
         });
 
         reject_unsupported_attributes(&attributes)?;
+        reject_duplicate_attribute_types(&attributes)?;
         require_object_access(&session, &unwrapping_key, logged_in)?;
         require_login_to_create(&attributes, class, logged_in)?;
 
@@ -973,6 +979,7 @@ impl Hsm {
         require_login_for_private(&attributes, logged_in)?;
 
         reject_unsupported_attributes(&overrides)?;
+        reject_duplicate_attribute_types(&overrides)?;
 
         for update in overrides {
             let attribute_type = update.attribute_type().ok_or(HsmError::AttributeTypeInvalid)?;
@@ -1387,6 +1394,22 @@ const SECP256R1_EC_PARAMS: [u8; 10] = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
 fn reject_unsupported_attributes(attributes: &[Attribute]) -> Result<()> {
     if attributes.iter().any(|attr| matches!(attr, Attribute::Unsupported)) {
         return Err(HsmError::AttributeTypeInvalid);
+    }
+    Ok(())
+}
+
+/// Rejects a creation/generation template that carries the same attribute
+/// type more than once. PKCS#11 leaves the behaviour for duplicates up to the
+/// token; conflicting duplicates are `CKR_TEMPLATE_INCONSISTENT`. rustssm
+/// treats any repetition as inconsistent so readback and search stay
+/// single-valued, matching the one-attribute-per-type invariant that
+/// [`set_object_attributes`] relies on when it does retain-then-push.
+fn reject_duplicate_attribute_types(attributes: &[Attribute]) -> Result<()> {
+    let mut seen = HashSet::new();
+    for attribute_type in attributes.iter().filter_map(Attribute::attribute_type) {
+        if !seen.insert(attribute_type) {
+            return Err(HsmError::TemplateInconsistent);
+        }
     }
     Ok(())
 }

@@ -375,14 +375,23 @@ Ranked; being worked one at a time.
       `require_login_for_private`. The read-only-session tests now log the token
       in first so the RO rejection (not login) is what fires. Covered by the
       extended `creating_a_private_object_requires_login`.
-- [ ] **Reject duplicate attribute types in templates** — a creation template
-      carrying the same attribute type twice is stored twice; readback then
-      returns whichever comes first while search matches either value. Spec:
-      conflicting duplicates are `CKR_TEMPLATE_INCONSISTENT`. Enforce
-      one-attribute-per-type at the object-creating entry points
-      (`create_object`, `generate_key(_pair)`, `unwrap_key`, `copy_object`)
-      — `set_object_attributes` already assumes this invariant when it does
-      retain-then-push.
+- [x] **Reject duplicate attribute types in templates** — a creation template
+      carrying the same attribute type twice is now rejected with
+      `CKR_TEMPLATE_INCONSISTENT` at every object-creating entry point
+      (`create_object`, `generate_key(_pair)`, `unwrap_key`, `copy_object`) via
+      `reject_duplicate_attribute_types`, which runs right after
+      `reject_unsupported_attributes`. This enforces the one-attribute-per-type
+      invariant that `set_object_attributes` already assumed when it does
+      retain-then-push, so readback stays single-valued and search cannot match
+      either of two conflicting values. `Unknown`/`Unsupported` attributes (no
+      readable type) are skipped by the check, matching how
+      `reject_unsupported_attributes` already handles `Unsupported`. Covered by
+      `create_object_rejects_duplicate_attribute_types`,
+      `generate_key_rejects_duplicate_attribute_types`,
+      `generate_key_pair_rejects_duplicate_attribute_types`,
+      `unwrap_key_rejects_duplicate_attribute_types`,
+      `copy_object_rejects_duplicate_attribute_types`, and a positive control
+      (`duplicate_attribute_types_check_allows_distinct_types`).
 - [ ] **Search template with an untracked attribute must match nothing —
       explicitly** — an unrecognized attribute in a `C_FindObjectsInit`
       template parses to `Attribute::Unknown`, and `Unknown == Unknown`, so

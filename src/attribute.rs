@@ -80,7 +80,7 @@ impl Attribute {
 
 /// Attribute types that can be requested through `C_GetAttributeValue`. Each
 /// corresponds to exactly one [`Attribute`] variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttributeType {
     Class,
     KeyType,

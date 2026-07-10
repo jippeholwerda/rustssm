@@ -1980,6 +1980,134 @@ fn copy_object_rejects_security_downgrades_and_read_only_overrides() {
 }
 
 #[test]
+fn create_object_rejects_duplicate_attribute_types() {
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // The same attribute type supplied twice is inconsistent, even when the
+    // two values agree: readback and search must stay single-valued.
+    assert!(matches!(
+        hsm.create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::SecretKey),
+                Attribute::Value(vec![0u8; 32]),
+                Attribute::Label(String::from("dup")),
+                Attribute::Label(String::from("dup")),
+            ],
+        ),
+        Err(HsmError::TemplateInconsistent)
+    ));
+}
+
+#[test]
+fn generate_key_rejects_duplicate_attribute_types() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    assert!(matches!(
+        hsm.generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![Attribute::ValueLen(32), Attribute::ValueLen(32)],
+        ),
+        Err(HsmError::TemplateInconsistent)
+    ));
+}
+
+#[test]
+fn generate_key_pair_rejects_duplicate_attribute_types() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // Duplicate CKA_LABEL in the private half.
+    let dup = vec![
+        Attribute::Label(String::from("a")),
+        Attribute::Label(String::from("b")),
+    ];
+    assert!(matches!(
+        hsm.generate_key_pair(
+            session,
+            &Mechanism::EcKeyPairGen,
+            vec![],
+            dup,
+        ),
+        Err(HsmError::TemplateInconsistent)
+    ));
+}
+
+#[test]
+fn unwrap_key_rejects_duplicate_attribute_types() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let wrapping_key = generate_secret_key(&hsm, session, 32, "kek");
+    let key = generate_secret_key(&hsm, session, 32, "payload");
+    let wrapped = hsm
+        .wrap_key(session, &Mechanism::AesKeyWrapPad, wrapping_key.clone(), key)
+        .unwrap();
+
+    assert!(matches!(
+        hsm.unwrap_key(
+            session,
+            &Mechanism::AesKeyWrapPad,
+            wrapping_key,
+            &wrapped,
+            vec![
+                Attribute::Label(String::from("unwrapped")),
+                Attribute::Label(String::from("dup")),
+            ],
+        ),
+        Err(HsmError::TemplateInconsistent)
+    ));
+}
+
+#[test]
+fn copy_object_rejects_duplicate_attribute_types() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let source = hsm
+        .generate_key(session, &Mechanism::AesKeyGen, vec![Attribute::ValueLen(32)])
+        .unwrap();
+
+    assert!(matches!(
+        hsm.copy_object(
+            session,
+            source,
+            vec![
+                Attribute::Label(String::from("copy")),
+                Attribute::Label(String::from("dup")),
+            ],
+        ),
+        Err(HsmError::TemplateInconsistent)
+    ));
+}
+
+#[test]
+fn duplicate_attribute_types_check_allows_distinct_types() {
+    use crate::attribute::ObjectClass;
+
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // Distinct attribute types are fine; the new guard must not reject a
+    // legitimate template.
+    assert!(hsm
+        .create_object(
+            session,
+            vec![
+                Attribute::Class(ObjectClass::SecretKey),
+                Attribute::Value(vec![0u8; 32]),
+                Attribute::Label(String::from("ok")),
+                Attribute::Token(true),
+            ],
+        )
+        .is_ok());
+}
+
+#[test]
 fn session_objects_are_destroyed_when_their_session_closes() {
     let hsm = hsm_with_token();
     let creator = user_session(&hsm);
