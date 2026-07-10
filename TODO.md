@@ -263,6 +263,19 @@ multipart operations.
       `ObjectRecord` is postcard'd again). Interim mitigation if deferred: a
       stored format-version guard plus an append-only rule for those enums.
 
+- [ ] **Richer error logging at the FFI boundary.** `ck()` logs every non-OK
+      return as a bare hex code (`debug!("{name} returned 0x{rv:08x}")`), e.g.
+      `C_Sign returned 0x00000021` rather than `CKR_DATA_LEN_RANGE` — so failures
+      are traceable only at `debug` level and only by decoding the hex by hand.
+      Map the `CK_RV` to its `CKR_*` name in that one `debug!` (a lookup table)
+      so it benefits every function. Note the deliberate current convention:
+      the domain layer is log-free except `object_store` (device/DB failures,
+      surfaced via the `warn!` in `rv_from`); the FFI layer owns return-code
+      logging. Domain input-rejection reasons (e.g. *why* a sign was
+      `DataLenRange`) are not logged because the crypto traits return
+      `Option`/`bool` and discard the reason — surfacing those would be a
+      separate logging-policy change, not just this table.
+
 ## 4. Code review findings (2026-07-09)
 
 Ranked; being worked one at a time.
@@ -306,16 +319,26 @@ Ranked; being worked one at a time.
       carry `CKA_KEY_TYPE = AES`, so they are findable by a `KeyType` template
       exactly like a generated AES key. Covered by the extended
       `import_aes_key_stores_a_usable_key`.
-- [ ] **Login enforcement — decide and act** — private objects
-      (`CKA_PRIVATE` true) are findable/usable without `C_Login`; only PIN
-      management is login-gated. nl-wallet always logs in, so no impact.
-      Either enforce `CKR_USER_NOT_LOGGED_IN` on private-object access or
-      document the deviation in the README error-policy section.
-- [ ] **`CKM_RSA_PKCS` uses the wrong padding** — it is implemented as
-      `CKM_SHA256_RSA_PKCS` (`pkcs1v15::SigningKey::<Sha256>` hashes + embeds
-      DigestInfo). Raw `CKM_RSA_PKCS` must pad the data as given, no hashing.
-      Self-consistent internally (own tests pass), breaks external interop.
-      No nl-wallet impact (no RSA). Fix via the `rsa` crate's unprefixed path.
+- [x] **Login enforcement** — private objects (`CKA_PRIVATE` true) are now
+      gated per PKCS#11 §4.4: a session not logged in as the normal user has
+      them excluded from `C_FindObjects` and is refused creating or accessing
+      one by handle (`CKR_USER_NOT_LOGGED_IN`); public objects are unrestricted.
+      Enforced in the domain layer: `logged_in_as_user` captures the slot's
+      login state *before* the session lock (the lock order is slot→session),
+      then `require_login_for_private`/`require_object_access` gate creation and
+      handle access, and `ObjectStore::search` filters private rows. nl-wallet
+      is unaffected (it logs in per pooled session). Covered by
+      `private_objects_are_inaccessible_without_login`,
+      `creating_a_private_object_requires_login`, and
+      `search_excludes_private_objects_when_not_permitted`.
+- [x] **`CKM_RSA_PKCS` uses the wrong padding** — now signs/verifies with
+      `Pkcs1v15Sign::new_unprefixed()`, padding the data as given (PKCS#1 v1.5
+      block type 01, no hashing/DigestInfo) instead of the old
+      `CKM_SHA256_RSA_PKCS` behaviour. `Sign::sign` returns `Option` (like
+      `Encrypt`/`Decrypt`); oversized input maps to `CKR_DATA_LEN_RANGE`.
+      Covered by `rsa_pkcs_pads_raw_data_and_rejects_oversized_input` (the
+      oversized-input rejection is a discriminator the old hashing path could
+      not satisfy).
 - [x] **`CKA_VALUE` of a sensitive key** now returns `CKR_ATTRIBUTE_SENSITIVE`
       (with `ulValueLen = CK_UNAVAILABLE_INFORMATION`) in `C_GetAttributeValue`,
       distinct from `CKR_ATTRIBUTE_TYPE_INVALID` for an attribute the object
@@ -323,3 +346,31 @@ Ranked; being worked one at a time.
 - [ ] **README: wrapped-key portability** — `C_WrapKey` wraps the raw 32-byte
       EC scalar, while SoftHSM wraps a PKCS#8 `PrivateKeyInfo`; wrapped keys are
       not portable between the two implementations. Worth a README line.
+- [ ] **Materialize default attributes at write time** — objects store only
+      template + synthesized attributes, and search matches on
+      presence-plus-equality, so a template like `CKA_PRIVATE = false` or
+      `CKA_SIGN = false` never matches an object whose template omitted that
+      attribute — where SoftHSM would match, because it materializes the full
+      attribute set at creation. Fix in `merge_attributes` (the single write
+      path): add the spec defaults for the tracked boolean attributes when
+      the template doesn't carry them, so the stored list is complete and
+      `ObjectStore::search` stays a plain equality check. Query side stays
+      untouched.
+- [ ] **Reject duplicate attribute types in templates** — a creation template
+      carrying the same attribute type twice is stored twice; readback then
+      returns whichever comes first while search matches either value. Spec:
+      conflicting duplicates are `CKR_TEMPLATE_INCONSISTENT`. Enforce
+      one-attribute-per-type at the object-creating entry points
+      (`create_object`, `generate_key(_pair)`, `unwrap_key`, `copy_object`)
+      — `set_object_attributes` already assumes this invariant when it does
+      retain-then-push.
+- [ ] **Search template with an untracked attribute must match nothing —
+      explicitly** — an unrecognized attribute in a `C_FindObjectsInit`
+      template parses to `Attribute::Unknown`, and `Unknown == Unknown`, so
+      matching relies on no object ever *storing* an `Unknown`. That is true
+      today (all object-creating paths run `merge_attributes`, which drops
+      them) but only by construction. Make the semantics explicit: have
+      `find_objects_init` (or `search`) treat a template containing `Unknown`
+      as matching zero objects, with a test, so a future write path that
+      forgets to merge can't silently turn two different unrecognized
+      attributes into a wildcard match of each other.

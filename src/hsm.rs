@@ -545,10 +545,12 @@ impl Hsm {
     /// the template attributes are persisted verbatim (minus `CKA_VALUE`, which
     /// becomes the key material) for later readback.
     pub fn create_object(&self, session_id: SessionId, attributes: Vec<Attribute>) -> Result<ObjectId> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
         reject_unsupported_attributes(&attributes)?;
+        require_login_for_private(&attributes, logged_in)?;
         self.check_writable(&session, &attributes)?;
 
         let class = attributes.iter().find_map(|attr| match attr {
@@ -602,6 +604,7 @@ impl Hsm {
         label: String,
         id: Option<Vec<u8>>,
     ) -> Result<ObjectId> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
@@ -615,6 +618,7 @@ impl Hsm {
         if let Some(id) = id {
             attributes.push(Attribute::Id(id));
         }
+        require_login_for_private(&attributes, logged_in)?;
         self.check_writable(&session, &attributes)?;
 
         session.write_object(&key, attributes).map_err(store_error)
@@ -626,10 +630,12 @@ impl Hsm {
         mechanism: &Mechanism,
         attributes: Vec<Attribute>,
     ) -> Result<ObjectId> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
         reject_unsupported_attributes(&attributes)?;
+        require_login_for_private(&attributes, logged_in)?;
         self.check_writable(&session, &attributes)?;
 
         let (key_len, key_type) = match mechanism {
@@ -669,10 +675,13 @@ impl Hsm {
         public_key_attributes: Vec<Attribute>,
         private_key_attributes: Vec<Attribute>,
     ) -> Result<(ObjectId, ObjectId)> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
 
         reject_unsupported_attributes(&public_key_attributes)?;
         reject_unsupported_attributes(&private_key_attributes)?;
+        require_login_for_private(&public_key_attributes, logged_in)?;
+        require_login_for_private(&private_key_attributes, logged_in)?;
 
         {
             let session = session_lock.read().unwrap();
@@ -771,8 +780,12 @@ impl Hsm {
         wrapping_key: ObjectId,
         key: ObjectId,
     ) -> Result<Vec<u8>> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
+
+        require_object_access(&session, &wrapping_key, logged_in)?;
+        require_object_access(&session, &key, logged_in)?;
 
         match mechanism {
             Mechanism::AesKeyWrapPad => {
@@ -802,10 +815,13 @@ impl Hsm {
         wrapped_key: &[u8],
         attributes: Vec<Attribute>,
     ) -> Result<ObjectId> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
         reject_unsupported_attributes(&attributes)?;
+        require_object_access(&session, &unwrapping_key, logged_in)?;
+        require_login_for_private(&attributes, logged_in)?;
 
         match mechanism {
             Mechanism::AesKeyWrapPad => {
@@ -838,8 +854,11 @@ impl Hsm {
     // ---- objects -----------------------------------------------------------
 
     pub fn destroy_object(&self, session_id: SessionId, object: ObjectId) -> Result<()> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
+
+        require_object_access(&session, &object, logged_in)?;
 
         session.delete_object(&object).map_err(|error| match error {
             SessionError::ObjectStore(ObjectStoreError::Database(e)) => {
@@ -865,6 +884,7 @@ impl Hsm {
         object: ObjectId,
         attribute_type: AttributeType,
     ) -> Result<Option<Attribute>> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
@@ -874,6 +894,8 @@ impl Hsm {
             }
             _ => HsmError::ObjectHandleInvalid,
         })?;
+
+        require_login_for_private(&attributes, logged_in)?;
 
         Ok(attributes
             .into_iter()
@@ -890,6 +912,7 @@ impl Hsm {
         object: ObjectId,
         updates: Vec<Attribute>,
     ) -> Result<()> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
@@ -899,6 +922,8 @@ impl Hsm {
             }
             _ => HsmError::ObjectHandleInvalid,
         })?;
+
+        require_login_for_private(&attributes, logged_in)?;
 
         let token_object = attributes.iter().any(|attr| matches!(attr, Attribute::Token(true)));
         if token_object && matches!(session.state, SessionState::ReadOnly) {
@@ -924,6 +949,7 @@ impl Hsm {
     /// not be made non-sensitive and a non-extractable key may not be made
     /// extractable. The copy shares the source's key material.
     pub fn copy_object(&self, session_id: SessionId, source: ObjectId, overrides: Vec<Attribute>) -> Result<ObjectId> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
@@ -933,6 +959,9 @@ impl Hsm {
             }
             _ => HsmError::ObjectHandleInvalid,
         })?;
+
+        // Accessing a private source requires login (§4.4).
+        require_login_for_private(&attributes, logged_in)?;
 
         reject_unsupported_attributes(&overrides)?;
 
@@ -948,6 +977,8 @@ impl Hsm {
             attributes.push(update);
         }
 
+        // Creating a private copy also requires login (§4.4).
+        require_login_for_private(&attributes, logged_in)?;
         // The copy may become a token object; that still needs a R/W session.
         self.check_writable(&session, &attributes)?;
 
@@ -955,10 +986,15 @@ impl Hsm {
     }
 
     pub fn find_objects_init(&self, session_id: SessionId, attributes: Vec<Attribute>) -> Result<()> {
+        // A session not logged in as the normal user may not see private
+        // objects (PKCS#11 §4.4), so they are excluded from the search.
+        let include_private = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
-        session.init_search(attributes).map_err(|_| HsmError::OperationActive)
+        session
+            .init_search(attributes, include_private)
+            .map_err(|_| HsmError::OperationActive)
     }
 
     pub fn find_objects_next(&self, session_id: SessionId, max_count: usize) -> Result<Vec<ObjectId>> {
@@ -990,12 +1026,15 @@ impl Hsm {
     // ---- sign / verify / encrypt --------------------------------------------
 
     pub fn sign_init(&self, session_id: SessionId, mechanism: &Mechanism, key: ObjectId) -> Result<()> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
         if session.operation.get().is_some() {
             return Err(HsmError::OperationActive);
         }
+
+        require_object_access(&session, &key, logged_in)?;
 
         let operation = match mechanism {
             Mechanism::RsaPkcs => {
@@ -1048,16 +1087,21 @@ impl Hsm {
         }
 
         let operation = session.operation.take().unwrap();
-        Ok(operation.sign(data).0)
+        // `None` means the input is unusable for the mechanism — for raw
+        // CKM_RSA_PKCS, data longer than the modulus can pad.
+        Ok(operation.sign(data).ok_or(HsmError::DataLenRange)?.0)
     }
 
     pub fn verify_init(&self, session_id: SessionId, mechanism: &Mechanism, key: ObjectId) -> Result<()> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
         if session.operation.get().is_some() {
             return Err(HsmError::OperationActive);
         }
+
+        require_object_access(&session, &key, logged_in)?;
 
         let operation = match mechanism {
             Mechanism::RsaPkcs => {
@@ -1103,12 +1147,15 @@ impl Hsm {
     }
 
     pub fn encrypt_init(&self, session_id: SessionId, mechanism: &Mechanism, key: ObjectId) -> Result<()> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
         if session.operation.get().is_some() {
             return Err(HsmError::OperationActive);
         }
+
+        require_object_access(&session, &key, logged_in)?;
 
         match mechanism {
             Mechanism::AesGcm {
@@ -1162,12 +1209,15 @@ impl Hsm {
     }
 
     pub fn decrypt_init(&self, session_id: SessionId, mechanism: &Mechanism, key: ObjectId) -> Result<()> {
+        let logged_in = self.logged_in_as_user(session_id)?;
         let session_lock = self.get_session(session_id)?;
         let session = session_lock.read().unwrap();
 
         if session.operation.get().is_some() {
             return Err(HsmError::OperationActive);
         }
+
+        require_object_access(&session, &key, logged_in)?;
 
         match mechanism {
             Mechanism::AesGcm {
@@ -1230,6 +1280,19 @@ impl Hsm {
             return Err(HsmError::SessionReadOnly);
         }
         Ok(())
+    }
+
+    /// Whether the session's slot is currently logged in as the normal user.
+    /// Private objects (`CKA_PRIVATE`) may only be created or accessed while it
+    /// is (PKCS#11 §4.4). Fetched via its own brief slot lock so callers can
+    /// capture it *before* taking the session lock — the lock order is
+    /// slot→session, so the slot lock must never nest inside a session lock.
+    fn logged_in_as_user(&self, session_id: SessionId) -> Result<bool> {
+        let slot_lock = self
+            .find_by_session_id(session_id)
+            .ok_or(HsmError::SessionNotFound(session_id))?;
+        let logged_in = slot_lock.read().unwrap().current_user_type == Some(UserType::User);
+        Ok(logged_in)
     }
 
     fn get_slot(&self, slot_id: &SlotId) -> Result<Arc<RwLock<Slot>>> {
@@ -1317,6 +1380,36 @@ fn reject_unsupported_attributes(attributes: &[Attribute]) -> Result<()> {
         return Err(HsmError::AttributeTypeInvalid);
     }
     Ok(())
+}
+
+/// Whether `attributes` describe a private object (`CKA_PRIVATE` true).
+fn is_private(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attr| matches!(attr, Attribute::Private(true)))
+}
+
+/// Enforces PKCS#11 §4.4 for creating or accessing an object whose attributes
+/// (a creation template or an object's stored list) are already in hand: a
+/// private object requires a session logged in as the normal user.
+/// `logged_in_as_user` must be captured from the slot before the session lock.
+fn require_login_for_private(attributes: &[Attribute], logged_in_as_user: bool) -> Result<()> {
+    if !logged_in_as_user && is_private(attributes) {
+        return Err(HsmError::UserNotLoggedIn);
+    }
+    Ok(())
+}
+
+/// Enforces §4.4 for accessing an existing object by handle when its
+/// attributes are not otherwise read: a private object requires the normal
+/// user. An unreadable handle falls through so the operation's own handle
+/// validation reports it.
+fn require_object_access(session: &Session, object: &ObjectId, logged_in_as_user: bool) -> Result<()> {
+    if logged_in_as_user {
+        return Ok(());
+    }
+    match session.read_object_attributes(object) {
+        Ok(attributes) => require_login_for_private(&attributes, logged_in_as_user),
+        Err(_) => Ok(()),
+    }
 }
 
 /// Whether applying `update` to an object carrying `current` attributes would

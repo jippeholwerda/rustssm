@@ -694,6 +694,36 @@ fn rsa_sign_verify_roundtrip() {
 }
 
 #[test]
+fn rsa_pkcs_pads_raw_data_and_rejects_oversized_input() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let (public_key, private_key) = hsm
+        .generate_key_pair(
+            session,
+            &Mechanism::RsaPkcsKeyPairGen,
+            vec![Attribute::ModulusBits(MIN_RSA_MODULUS_BITS)],
+            vec![],
+        )
+        .unwrap();
+
+    // CKM_RSA_PKCS pads the input as given (no hashing/DigestInfo), so a short
+    // "digest" round-trips directly.
+    let short = [0x11u8; 32];
+    hsm.sign_init(session, &Mechanism::RsaPkcs, private_key.clone()).unwrap();
+    let signature = hsm.sign(session, &short).unwrap();
+    hsm.verify_init(session, &Mechanism::RsaPkcs, public_key).unwrap();
+    hsm.verify(session, &short, &signature).unwrap();
+
+    // Input longer than the modulus can PKCS#1-pad (k - 11 bytes) is rejected
+    // with CKR_DATA_LEN_RANGE. The old digest-then-sign path would have hashed
+    // this to 32 bytes and succeeded, so this pins down the raw padding.
+    let oversized = vec![0x22u8; (MIN_RSA_MODULUS_BITS as usize / 8) - 10];
+    hsm.sign_init(session, &Mechanism::RsaPkcs, private_key).unwrap();
+    assert!(matches!(hsm.sign(session, &oversized), Err(HsmError::DataLenRange)));
+}
+
+#[test]
 fn ecdsa_sign_verify_roundtrip_and_tamper_detection() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
@@ -1091,6 +1121,88 @@ fn unwrap_drops_untracked_template_attributes() {
     let found = hsm.find_objects_next(session, 10).unwrap();
     hsm.find_objects_final(session).unwrap();
     assert_eq!(found, vec![unwrapped]);
+}
+
+// ---- login enforcement (PKCS#11 §4.4) ----------------------------------
+
+#[test]
+fn private_objects_are_inaccessible_without_login() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // A private object and a public one, both session objects.
+    let private_key = generate_secret_key(&hsm, session, 32, "secret");
+    let public_key = hsm
+        .generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![Attribute::ValueLen(32), Attribute::Label(String::from("public"))],
+        )
+        .unwrap();
+
+    // Drop the user login (the session and its objects remain). Login is
+    // per-token, so this makes the whole session un-authenticated.
+    hsm.logout(session).unwrap();
+
+    // The private object is excluded from searches...
+    hsm.find_objects_init(session, vec![Attribute::Label(String::from("secret"))])
+        .unwrap();
+    let found = hsm.find_objects_next(session, 10).unwrap();
+    hsm.find_objects_final(session).unwrap();
+    assert!(found.is_empty());
+
+    // ...and inaccessible by handle (read, use as a key, destroy).
+    assert!(matches!(
+        hsm.object_attribute(session, private_key.clone(), AttributeType::Label),
+        Err(HsmError::UserNotLoggedIn)
+    ));
+    assert!(matches!(
+        hsm.sign_init(session, &Mechanism::Sha256Hmac, private_key.clone()),
+        Err(HsmError::UserNotLoggedIn)
+    ));
+    assert!(matches!(
+        hsm.destroy_object(session, private_key),
+        Err(HsmError::UserNotLoggedIn)
+    ));
+
+    // The public object stays visible and readable.
+    hsm.find_objects_init(session, vec![Attribute::Label(String::from("public"))])
+        .unwrap();
+    let found = hsm.find_objects_next(session, 10).unwrap();
+    hsm.find_objects_final(session).unwrap();
+    assert_eq!(found, vec![public_key.clone()]);
+    assert!(hsm.object_attribute(session, public_key, AttributeType::Label).is_ok());
+}
+
+#[test]
+fn creating_a_private_object_requires_login() {
+    let hsm = hsm_with_token();
+    // A session that never logged in.
+    let session = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+
+    // A private key cannot be generated without logging in...
+    assert!(matches!(
+        hsm.generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![
+                Attribute::ValueLen(32),
+                Attribute::Label(String::from("k")),
+                Attribute::Private(true),
+            ],
+        ),
+        Err(HsmError::UserNotLoggedIn)
+    ));
+
+    // ...but a public key is allowed.
+    assert!(
+        hsm.generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![Attribute::ValueLen(32), Attribute::Label(String::from("pub"))],
+        )
+        .is_ok()
+    );
 }
 
 #[test]

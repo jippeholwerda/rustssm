@@ -46,14 +46,16 @@ pub struct Session {
 #[derive(Default)]
 pub struct SearchOperation {
     attributes: Vec<Attribute>,
+    include_private: bool,
     object_ids: Vec<ObjectId>,
     search_performed: bool,
 }
 
 impl SearchOperation {
-    pub fn init(attributes: Vec<Attribute>) -> Self {
+    pub fn init(attributes: Vec<Attribute>, include_private: bool) -> Self {
         Self {
             attributes,
+            include_private,
             ..Default::default()
         }
     }
@@ -128,9 +130,9 @@ impl Session {
         self.objects.delete(object_id).map_err(SessionError::ObjectStore)
     }
 
-    pub fn init_search(&self, attributes: Vec<Attribute>) -> Result<(), SessionError> {
+    pub fn init_search(&self, attributes: Vec<Attribute>, include_private: bool) -> Result<(), SessionError> {
         self.search_operation
-            .set(SearchOperation::init(attributes))
+            .set(SearchOperation::init(attributes, include_private))
             .map_err(|_| SearchActive)
     }
 
@@ -141,12 +143,16 @@ impl Session {
     pub fn search_result(&mut self) -> Result<Option<ObjectId>, SessionError> {
         if let Some(SearchOperation {
             attributes,
+            include_private,
             object_ids,
             search_performed,
         }) = self.search_operation.get_mut()
         {
             if !*search_performed {
-                *object_ids = self.objects.search(attributes).map_err(SessionError::ObjectStore)?;
+                *object_ids = self
+                    .objects
+                    .search(attributes, *include_private)
+                    .map_err(SessionError::ObjectStore)?;
                 *search_performed = true;
             }
 

@@ -15,9 +15,6 @@ use rsa::pkcs1v15;
 use rsa::traits::PublicKeyParts;
 use sha2::Sha256;
 use signature::hazmat::PrehashVerifier;
-use signature::RandomizedSigner;
-use signature::SignatureEncoding;
-use signature::Verifier;
 
 use crate::operation::Operation;
 
@@ -58,7 +55,9 @@ where
 pub struct Signature(pub Vec<u8>);
 
 pub trait Sign {
-    fn sign(self, data: &[u8]) -> Signature;
+    /// Signs `data`, or `None` when the input is unusable for the mechanism
+    /// (e.g. raw RSA data longer than the modulus allows).
+    fn sign(self, data: &[u8]) -> Option<Signature>;
 }
 
 pub trait SignatureLength {
@@ -78,22 +77,24 @@ pub trait Decrypt {
 }
 
 impl Sign for Operation {
-    fn sign(self, data: &[u8]) -> Signature {
+    fn sign(self, data: &[u8]) -> Option<Signature> {
         match self {
-            Operation::SignRsa { private_key } => {
-                let signing_key = pkcs1v15::SigningKey::<Sha256>::new(*private_key);
-                let mut rng = rand::rng();
-                let signature = signing_key.sign_with_rng(&mut rng, data);
-                Signature(signature.to_bytes().to_vec())
-            }
+            // CKM_RSA_PKCS pads the input as given with PKCS#1 v1.5 block type
+            // 01 and signs it directly — no hashing and no DigestInfo prefix
+            // (that would be CKM_SHA256_RSA_PKCS). Fails if `data` is longer
+            // than the modulus can pad.
+            Operation::SignRsa { private_key } => private_key
+                .sign(pkcs1v15::Pkcs1v15Sign::new_unprefixed(), data)
+                .ok()
+                .map(Signature),
             Operation::SignEcdsa { signing_key } => {
                 let (signature, _) = signing_key.sign_prehash_recoverable(data);
-                Signature(signature.to_bytes().to_vec())
+                Some(Signature(signature.to_bytes().to_vec()))
             }
             Operation::SignSha256Hmac { mut signing_key } => {
                 signing_key.update(data);
                 let signature = signing_key.finalize().into_bytes();
-                Signature(signature.to_vec())
+                Some(Signature(signature.to_vec()))
             }
             _ => unimplemented!("operation not supported"),
         }
@@ -114,12 +115,11 @@ impl SignatureLength for Operation {
 impl Verify for Operation {
     fn verify(self, data: &[u8], signature: &[u8]) -> bool {
         match self {
-            Operation::VerifyRsa { public_key } => {
-                let verifying_key = pkcs1v15::VerifyingKey::<Sha256>::new(*public_key);
-                pkcs1v15::Signature::try_from(signature)
-                    .map(|signature| verifying_key.verify(data, &signature).is_ok())
-                    .unwrap_or(false)
-            }
+            // Verifies the CKM_RSA_PKCS counterpart: the recovered padded block
+            // must equal `data` as given, with no DigestInfo prefix.
+            Operation::VerifyRsa { public_key } => public_key
+                .verify(pkcs1v15::Pkcs1v15Sign::new_unprefixed(), data, signature)
+                .is_ok(),
             // CKM_ECDSA verifies a message digest, so `data` must not be
             // hashed again (mirrors sign_prehash in the signing direction).
             Operation::VerifyEcdsa { verifying_key } => ecdsa::Signature::from_slice(signature)

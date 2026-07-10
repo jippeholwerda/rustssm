@@ -11,7 +11,10 @@ Implemented (and exercised by the rust-cryptoki test suite):
 - Slot/token management: `C_GetSlotList`, `C_GetSlotInfo`, `C_GetTokenInfo`,
   `C_InitToken`, `C_GetInfo`
 - Sessions and authentication: open/close sessions, session info, SO/user
-  login, `C_InitPIN`, `C_SetPIN`
+  login, `C_InitPIN`, `C_SetPIN`. Private objects (`CKA_PRIVATE` true) are
+  enforced per PKCS#11 §4.4: until the normal user is logged in they are
+  excluded from `C_FindObjects` and cannot be created or accessed by handle
+  (`CKR_USER_NOT_LOGGED_IN`); public objects are unrestricted
 - Key generation: `CKM_GENERIC_SECRET_KEY_GEN`, `CKM_AES_KEY_GEN`,
   `CKM_RSA_PKCS_KEY_PAIR_GEN`, `CKM_EC_KEY_PAIR_GEN` (P-256)
 - Sign/verify: `CKM_RSA_PKCS`, `CKM_ECDSA`, `CKM_SHA256_HMAC` (single-part)

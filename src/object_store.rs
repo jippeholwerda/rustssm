@@ -324,8 +324,10 @@ impl ObjectStore {
 
     /// Returns the ids of all objects whose stored attributes are a superset
     /// of `template`: every requested attribute must be present with an equal
-    /// value. An empty template matches every object.
-    pub fn search(&self, template: &[Attribute]) -> Result<Vec<ObjectId>, ObjectStoreError> {
+    /// value. An empty template matches every object. When `include_private`
+    /// is false, private objects (`CKA_PRIVATE` true) are excluded — the caller
+    /// is a session not logged in as the normal user (PKCS#11 §4.4).
+    pub fn search(&self, template: &[Attribute], include_private: bool) -> Result<Vec<ObjectId>, ObjectStoreError> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection
             .prepare("select id, content from object")
@@ -338,6 +340,10 @@ impl ObjectStore {
         for row in rows {
             let (id, content) = row.map_err(ObjectStoreError::Database)?;
             let record: ObjectRecord = postcard::from_bytes(&content).map_err(ObjectStoreError::Serialize)?;
+
+            if !include_private && record.attributes.iter().any(|attr| matches!(attr, Attribute::Private(true))) {
+                continue;
+            }
 
             let matches = template
                 .iter()
@@ -464,14 +470,38 @@ mod tests {
             .unwrap();
 
         // Both share the id; only one has label "a".
-        assert_eq!(store.search(&[Attribute::Id(b"shared".to_vec())]).unwrap().len(), 2);
-        assert_eq!(store.search(&[Attribute::Label(String::from("a"))]).unwrap(), vec![a]);
+        assert_eq!(store.search(&[Attribute::Id(b"shared".to_vec())], true).unwrap().len(), 2);
+        assert_eq!(store.search(&[Attribute::Label(String::from("a"))], true).unwrap(), vec![a]);
         // An unmatched attribute value excludes everything.
-        assert!(store.search(&[Attribute::Id(b"other".to_vec())]).unwrap().is_empty());
+        assert!(store.search(&[Attribute::Id(b"other".to_vec())], true).unwrap().is_empty());
         // An empty template matches all.
-        assert_eq!(store.search(&[]).unwrap().len(), 2);
+        assert_eq!(store.search(&[], true).unwrap().len(), 2);
 
         let _ = b;
+    }
+
+    #[test]
+    fn search_excludes_private_objects_when_not_permitted() {
+        let store = ObjectStore::in_memory().unwrap();
+        let bytes = vec![0u8; 8];
+
+        let public = store
+            .write(vec![Attribute::Label(String::from("pub"))], &bytes, None)
+            .unwrap();
+        let private = store
+            .write(
+                vec![Attribute::Label(String::from("priv")), Attribute::Private(true)],
+                &bytes,
+                None,
+            )
+            .unwrap();
+
+        // Permitted: both are visible.
+        assert_eq!(store.search(&[], true).unwrap().len(), 2);
+        // Not permitted: the private object is filtered out.
+        assert_eq!(store.search(&[], false).unwrap(), vec![public]);
+        assert!(store.search(&[Attribute::Label(String::from("priv"))], false).unwrap().is_empty());
+        let _ = private;
     }
 
     #[test]
