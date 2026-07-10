@@ -1294,6 +1294,88 @@ pub unsafe extern "C" fn C_GetFunctionList(ppFunctionList: raw::CK_FUNCTION_LIST
     raw::CKR_OK
 }
 
+/// Defines `unsafe extern "C"` stubs that ignore their arguments and return
+/// `CKR_FUNCTION_NOT_SUPPORTED`. The PKCS#11 2.40 function list must be fully
+/// populated: a `None` (null) entry is a null function pointer that crashes any
+/// C client which calls it (e.g. `p11-kit`/`pkcs11-tool` call
+/// `C_GetMechanismList` unconditionally). Assigning each stub into
+/// `FUNCTION_LIST` makes the compiler check its signature against the field.
+macro_rules! not_supported_stubs {
+    ($( fn $name:ident ( $($ty:ty),* $(,)? ); )*) => {
+        $(
+            unsafe extern "C" fn $name($(_: $ty),*) -> raw::CK_RV {
+                raw::CKR_FUNCTION_NOT_SUPPORTED
+            }
+        )*
+    };
+}
+
+not_supported_stubs! {
+    fn stub_get_mechanism_list(raw::CK_SLOT_ID, raw::CK_MECHANISM_TYPE_PTR, raw::CK_ULONG_PTR);
+    fn stub_get_mechanism_info(raw::CK_SLOT_ID, raw::CK_MECHANISM_TYPE, raw::CK_MECHANISM_INFO_PTR);
+    fn stub_close_all_sessions(raw::CK_SLOT_ID);
+    fn stub_get_operation_state(raw::CK_SESSION_HANDLE, raw::CK_BYTE_PTR, raw::CK_ULONG_PTR);
+    fn stub_set_operation_state(
+        raw::CK_SESSION_HANDLE,
+        raw::CK_BYTE_PTR,
+        raw::CK_ULONG,
+        raw::CK_OBJECT_HANDLE,
+        raw::CK_OBJECT_HANDLE,
+    );
+    fn stub_get_object_size(raw::CK_SESSION_HANDLE, raw::CK_OBJECT_HANDLE, raw::CK_ULONG_PTR);
+    fn stub_digest_init(raw::CK_SESSION_HANDLE, raw::CK_MECHANISM_PTR);
+    fn stub_digest(raw::CK_SESSION_HANDLE, raw::CK_BYTE_PTR, raw::CK_ULONG, raw::CK_BYTE_PTR, raw::CK_ULONG_PTR);
+    fn stub_digest_update(raw::CK_SESSION_HANDLE, raw::CK_BYTE_PTR, raw::CK_ULONG);
+    fn stub_digest_key(raw::CK_SESSION_HANDLE, raw::CK_OBJECT_HANDLE);
+    fn stub_digest_final(raw::CK_SESSION_HANDLE, raw::CK_BYTE_PTR, raw::CK_ULONG_PTR);
+    fn stub_sign_update(raw::CK_SESSION_HANDLE, raw::CK_BYTE_PTR, raw::CK_ULONG);
+    fn stub_sign_final(raw::CK_SESSION_HANDLE, raw::CK_BYTE_PTR, raw::CK_ULONG_PTR);
+    fn stub_sign_recover_init(raw::CK_SESSION_HANDLE, raw::CK_MECHANISM_PTR, raw::CK_OBJECT_HANDLE);
+    fn stub_sign_recover(raw::CK_SESSION_HANDLE, raw::CK_BYTE_PTR, raw::CK_ULONG, raw::CK_BYTE_PTR, raw::CK_ULONG_PTR);
+    fn stub_verify_update(raw::CK_SESSION_HANDLE, raw::CK_BYTE_PTR, raw::CK_ULONG);
+    fn stub_verify_final(raw::CK_SESSION_HANDLE, raw::CK_BYTE_PTR, raw::CK_ULONG);
+    fn stub_verify_recover_init(raw::CK_SESSION_HANDLE, raw::CK_MECHANISM_PTR, raw::CK_OBJECT_HANDLE);
+    fn stub_verify_recover(raw::CK_SESSION_HANDLE, raw::CK_BYTE_PTR, raw::CK_ULONG, raw::CK_BYTE_PTR, raw::CK_ULONG_PTR);
+    fn stub_digest_encrypt_update(
+        raw::CK_SESSION_HANDLE,
+        raw::CK_BYTE_PTR,
+        raw::CK_ULONG,
+        raw::CK_BYTE_PTR,
+        raw::CK_ULONG_PTR,
+    );
+    fn stub_decrypt_digest_update(
+        raw::CK_SESSION_HANDLE,
+        raw::CK_BYTE_PTR,
+        raw::CK_ULONG,
+        raw::CK_BYTE_PTR,
+        raw::CK_ULONG_PTR,
+    );
+    fn stub_sign_encrypt_update(
+        raw::CK_SESSION_HANDLE,
+        raw::CK_BYTE_PTR,
+        raw::CK_ULONG,
+        raw::CK_BYTE_PTR,
+        raw::CK_ULONG_PTR,
+    );
+    fn stub_decrypt_verify_update(
+        raw::CK_SESSION_HANDLE,
+        raw::CK_BYTE_PTR,
+        raw::CK_ULONG,
+        raw::CK_BYTE_PTR,
+        raw::CK_ULONG_PTR,
+    );
+    fn stub_derive_key(
+        raw::CK_SESSION_HANDLE,
+        raw::CK_MECHANISM_PTR,
+        raw::CK_OBJECT_HANDLE,
+        raw::CK_ATTRIBUTE_PTR,
+        raw::CK_ULONG,
+        raw::CK_OBJECT_HANDLE_PTR,
+    );
+    fn stub_get_function_status(raw::CK_SESSION_HANDLE);
+    fn stub_cancel_function(raw::CK_SESSION_HANDLE);
+}
+
 static FUNCTION_LIST: raw::CK_FUNCTION_LIST = raw::CK_FUNCTION_LIST {
     version: raw::CK_VERSION { major: 2, minor: 40 },
     C_Initialize: Some(C_Initialize),
@@ -1303,23 +1385,23 @@ static FUNCTION_LIST: raw::CK_FUNCTION_LIST = raw::CK_FUNCTION_LIST {
     C_GetSlotList: Some(C_GetSlotList),
     C_GetSlotInfo: Some(C_GetSlotInfo),
     C_GetTokenInfo: Some(C_GetTokenInfo),
-    C_GetMechanismList: None,
-    C_GetMechanismInfo: None,
+    C_GetMechanismList: Some(stub_get_mechanism_list),
+    C_GetMechanismInfo: Some(stub_get_mechanism_info),
     C_InitToken: Some(C_InitToken),
     C_InitPIN: Some(C_InitPIN),
     C_SetPIN: Some(C_SetPIN),
     C_OpenSession: Some(C_OpenSession),
     C_CloseSession: Some(C_CloseSession),
-    C_CloseAllSessions: None,
+    C_CloseAllSessions: Some(stub_close_all_sessions),
     C_GetSessionInfo: Some(C_GetSessionInfo),
-    C_GetOperationState: None,
-    C_SetOperationState: None,
+    C_GetOperationState: Some(stub_get_operation_state),
+    C_SetOperationState: Some(stub_set_operation_state),
     C_Login: Some(C_Login),
     C_Logout: Some(C_Logout),
     C_CreateObject: Some(C_CreateObject),
     C_CopyObject: Some(C_CopyObject),
     C_DestroyObject: Some(C_DestroyObject),
-    C_GetObjectSize: None,
+    C_GetObjectSize: Some(stub_get_object_size),
     C_GetAttributeValue: Some(C_GetAttributeValue),
     C_SetAttributeValue: Some(C_SetAttributeValue),
     C_FindObjectsInit: Some(C_FindObjectsInit),
@@ -1333,36 +1415,36 @@ static FUNCTION_LIST: raw::CK_FUNCTION_LIST = raw::CK_FUNCTION_LIST {
     C_Decrypt: Some(C_Decrypt),
     C_DecryptUpdate: Some(C_DecryptUpdate),
     C_DecryptFinal: Some(C_DecryptFinal),
-    C_DigestInit: None,
-    C_Digest: None,
-    C_DigestUpdate: None,
-    C_DigestKey: None,
-    C_DigestFinal: None,
+    C_DigestInit: Some(stub_digest_init),
+    C_Digest: Some(stub_digest),
+    C_DigestUpdate: Some(stub_digest_update),
+    C_DigestKey: Some(stub_digest_key),
+    C_DigestFinal: Some(stub_digest_final),
     C_SignInit: Some(C_SignInit),
     C_Sign: Some(C_Sign),
-    C_SignUpdate: None,
-    C_SignFinal: None,
-    C_SignRecoverInit: None,
-    C_SignRecover: None,
+    C_SignUpdate: Some(stub_sign_update),
+    C_SignFinal: Some(stub_sign_final),
+    C_SignRecoverInit: Some(stub_sign_recover_init),
+    C_SignRecover: Some(stub_sign_recover),
     C_VerifyInit: Some(C_VerifyInit),
     C_Verify: Some(C_Verify),
-    C_VerifyUpdate: None,
-    C_VerifyFinal: None,
-    C_VerifyRecoverInit: None,
-    C_VerifyRecover: None,
-    C_DigestEncryptUpdate: None,
-    C_DecryptDigestUpdate: None,
-    C_SignEncryptUpdate: None,
-    C_DecryptVerifyUpdate: None,
+    C_VerifyUpdate: Some(stub_verify_update),
+    C_VerifyFinal: Some(stub_verify_final),
+    C_VerifyRecoverInit: Some(stub_verify_recover_init),
+    C_VerifyRecover: Some(stub_verify_recover),
+    C_DigestEncryptUpdate: Some(stub_digest_encrypt_update),
+    C_DecryptDigestUpdate: Some(stub_decrypt_digest_update),
+    C_SignEncryptUpdate: Some(stub_sign_encrypt_update),
+    C_DecryptVerifyUpdate: Some(stub_decrypt_verify_update),
     C_GenerateKey: Some(C_GenerateKey),
     C_GenerateKeyPair: Some(C_GenerateKeyPair),
     C_WrapKey: Some(C_WrapKey),
     C_UnwrapKey: Some(C_UnwrapKey),
-    C_DeriveKey: None,
+    C_DeriveKey: Some(stub_derive_key),
     C_SeedRandom: Some(C_SeedRandom),
     C_GenerateRandom: Some(C_GenerateRandom),
-    C_GetFunctionStatus: None,
-    C_CancelFunction: None,
+    C_GetFunctionStatus: Some(stub_get_function_status),
+    C_CancelFunction: Some(stub_cancel_function),
     C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
 };
 
@@ -1749,5 +1831,47 @@ mod tests {
             Attribute::Class(ObjectClass::SecretKey)
         );
         assert_eq!(read_one(&attribute(raw::CKA_TOKEN, &[1u8])), Attribute::Token(true));
+    }
+
+    #[test]
+    fn function_list_is_fully_populated() {
+        // Every entry the 2.40 list defines must be a real pointer: a `None`
+        // (null) entry crashes any C client that calls it. These are the
+        // functions that were previously null and are now stubbed.
+        let fl = &FUNCTION_LIST;
+        assert!(fl.C_GetMechanismList.is_some());
+        assert!(fl.C_GetMechanismInfo.is_some());
+        assert!(fl.C_CloseAllSessions.is_some());
+        assert!(fl.C_GetOperationState.is_some());
+        assert!(fl.C_SetOperationState.is_some());
+        assert!(fl.C_GetObjectSize.is_some());
+        assert!(fl.C_DigestInit.is_some());
+        assert!(fl.C_Digest.is_some());
+        assert!(fl.C_DigestUpdate.is_some());
+        assert!(fl.C_DigestKey.is_some());
+        assert!(fl.C_DigestFinal.is_some());
+        assert!(fl.C_SignUpdate.is_some());
+        assert!(fl.C_SignFinal.is_some());
+        assert!(fl.C_SignRecoverInit.is_some());
+        assert!(fl.C_SignRecover.is_some());
+        assert!(fl.C_VerifyUpdate.is_some());
+        assert!(fl.C_VerifyFinal.is_some());
+        assert!(fl.C_VerifyRecoverInit.is_some());
+        assert!(fl.C_VerifyRecover.is_some());
+        assert!(fl.C_DigestEncryptUpdate.is_some());
+        assert!(fl.C_DecryptDigestUpdate.is_some());
+        assert!(fl.C_SignEncryptUpdate.is_some());
+        assert!(fl.C_DecryptVerifyUpdate.is_some());
+        assert!(fl.C_DeriveKey.is_some());
+        assert!(fl.C_GetFunctionStatus.is_some());
+        assert!(fl.C_CancelFunction.is_some());
+    }
+
+    #[test]
+    fn stubbed_function_returns_not_supported_rather_than_crashing() {
+        let c_get_mechanism_list = FUNCTION_LIST.C_GetMechanismList.unwrap();
+        let mut count: raw::CK_ULONG = 0;
+        let rv = unsafe { c_get_mechanism_list(0, ptr::null_mut(), &mut count) };
+        assert_eq!(rv, raw::CKR_FUNCTION_NOT_SUPPORTED);
     }
 }

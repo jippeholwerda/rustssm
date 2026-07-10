@@ -265,12 +265,17 @@ Ranked; being worked one at a time.
       existing `attr_bytes` path. Closes the out-of-bounds read of an undersized
       buffer. Covered by `ulong_attribute_with_short_length_is_unknown_not_oob`,
       `bool_attribute_with_wrong_length_is_unknown`, and a positive control.
-- [ ] **Populate `FUNCTION_LIST` stubs** — `C_GetMechanismList`,
-      `C_CloseAllSessions`, `C_Digest*`, `C_GetObjectSize`, … are `None` (null C
-      function pointers). Real C clients (p11-kit, pkcs11-tool, OpenSSL) call
-      `C_GetMechanismList` unconditionally and segfault on null; rust-cryptoki
-      null-checks, which is why we haven't been bitten. Add stubs returning
-      `CKR_FUNCTION_NOT_SUPPORTED` (or implement where cheap).
+- [x] **Populate `FUNCTION_LIST` stubs** — the 26 previously-`None` entries
+      (`C_GetMechanismList`, `C_CloseAllSessions`, `C_Digest*`, `C_GetObjectSize`,
+      the multipart/recover/dual operations, `C_DeriveKey`, …) are now real
+      function pointers. A `not_supported_stubs!` macro generates one
+      correctly-typed stub per entry returning `CKR_FUNCTION_NOT_SUPPORTED`; the
+      compiler checks each signature against its `CK_FUNCTION_LIST` field on
+      assignment. Guards C clients (p11-kit, pkcs11-tool, OpenSSL) that call
+      these unconditionally against a null-pointer crash. Covered by
+      `function_list_is_fully_populated` and
+      `stubbed_function_returns_not_supported_rather_than_crashing`. (When a real
+      implementation lands for one of these, it replaces its stub.)
 - [ ] **`unwrap_key` should merge attributes** — it is the only object-creating
       path that skips `merge_attributes`, so an `Unknown` template attribute
       gets persisted and (since `Unknown == Unknown`) later matches unrelated
