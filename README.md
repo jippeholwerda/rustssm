@@ -62,6 +62,12 @@ encryption, EdDSA, and mechanisms not listed above. Unsupported calls return
 `CKR_FUNCTION_NOT_SUPPORTED` / `CKR_MECHANISM_INVALID`. See [TODO.md](TODO.md)
 for the roadmap.
 
+Wrapped-key format: `C_WrapKey` with `CKM_AES_KEY_WRAP_PAD` wraps an EC private
+key's raw 32-byte scalar, whereas SoftHSM wraps a PKCS#8 `PrivateKeyInfo`.
+Wrap/unwrap round-trips within rustssm are consistent, but a key wrapped by one
+implementation cannot be unwrapped by the other — do not migrate persisted
+wrapped keys between rustssm and SoftHSM.
+
 ## Provisioning a token
 
 The `rustssm-util` binary provisions tokens directly in the store — a rough

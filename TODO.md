@@ -343,6 +343,10 @@ Ranked; being worked one at a time.
       (with `ulValueLen = CK_UNAVAILABLE_INFORMATION`) in `C_GetAttributeValue`,
       distinct from `CKR_ATTRIBUTE_TYPE_INVALID` for an attribute the object
       genuinely lacks. Covered in the FFI test (`pkcs11_end_to_end`).
+- [x] **README: wrapped-key portability** — documented that `C_WrapKey`
+      (`CKM_AES_KEY_WRAP_PAD`) wraps the raw 32-byte EC scalar while SoftHSM
+      wraps a PKCS#8 `PrivateKeyInfo`, so wrapped keys are not portable between
+      the two implementations (round-trips within rustssm are fine).
 - [x] **Materialize default attributes at write time** — `merge_attributes`
       (the single write path) now appends class-keyed boolean defaults for the
       attributes a template omits, via `default_boolean_attributes(class)`, so
