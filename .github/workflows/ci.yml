@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (libclang for bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
+      - name: Install nightly toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal --component rustfmt
+          rustup override set nightly
+
+      - name: Install stable toolchain (for clippy/test)
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Check formatting
+        run: cargo +nightly fmt -- --check
+
+      - name: Clippy
+        run: cargo +stable clippy --lib --tests -- -D warnings
+
+      - name: Test
+        run: cargo +stable nextest run
