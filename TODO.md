@@ -343,19 +343,25 @@ Ranked; being worked one at a time.
       (with `ulValueLen = CK_UNAVAILABLE_INFORMATION`) in `C_GetAttributeValue`,
       distinct from `CKR_ATTRIBUTE_TYPE_INVALID` for an attribute the object
       genuinely lacks. Covered in the FFI test (`pkcs11_end_to_end`).
-- [ ] **README: wrapped-key portability** — `C_WrapKey` wraps the raw 32-byte
-      EC scalar, while SoftHSM wraps a PKCS#8 `PrivateKeyInfo`; wrapped keys are
-      not portable between the two implementations. Worth a README line.
-- [ ] **Materialize default attributes at write time** — objects store only
-      template + synthesized attributes, and search matches on
-      presence-plus-equality, so a template like `CKA_PRIVATE = false` or
-      `CKA_SIGN = false` never matches an object whose template omitted that
-      attribute — where SoftHSM would match, because it materializes the full
-      attribute set at creation. Fix in `merge_attributes` (the single write
-      path): add the spec defaults for the tracked boolean attributes when
-      the template doesn't carry them, so the stored list is complete and
-      `ObjectStore::search` stays a plain equality check. Query side stays
-      untouched.
+- [x] **Materialize default attributes at write time** — `merge_attributes`
+      (the single write path) now appends class-keyed boolean defaults for the
+      attributes a template omits, via `default_boolean_attributes(class)`, so
+      the stored list is complete and `ObjectStore::search` stays a plain
+      presence-plus-equality match (a template like `CKA_PRIVATE = false` or
+      `CKA_SIGN = false` now matches an object whose template never set it, as
+      against SoftHSM). Defaults (SoftHSM-like, chosen 2026-07-10): `CKA_TOKEN`
+      and `CKA_DERIVE` false everywhere (spec-fixed); `CKA_PRIVATE` true for
+      private/secret keys and false for public keys; key material sensitive and
+      non-extractable by default; usage flags opt-in (false). Consequence:
+      generated private/secret keys are now private objects, so §4.4 login
+      enforcement bites them — the concurrency test logs its token in and the
+      "public" objects in the login tests set `CKA_PRIVATE=false` explicitly.
+      `copy_object` inherits the source's already-materialized list, so it needs
+      no change. Covered by `write_paths_materialize_class_default_booleans`.
+      Known follow-up (separate decision): the creation login check reads the
+      template, not the materialized default, so a not-logged-in session can
+      still create a secret key that lands private-by-default and is then
+      unusable until login; SoftHSM rejects that up front.
 - [ ] **Reject duplicate attribute types in templates** — a creation template
       carrying the same attribute type twice is stored twice; readback then
       returns whichever comes first while search matches either value. Spec:

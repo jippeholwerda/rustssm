@@ -77,6 +77,12 @@ fn concurrent_sessions_from_many_threads_stay_correct() {
 
     let hsm = hsm_with_token();
 
+    // Generated keys are private by default, so accessing them by handle
+    // requires the normal user. Login is per-token, so one keep-alive session
+    // logs the token in for every thread's sessions (§4.4).
+    let login_session = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+    hsm.login(login_session, UserType::User, Pin::new(USER_PIN)).unwrap();
+
     const THREADS: usize = 12;
     const ITERATIONS: usize = 40;
     let completed = AtomicUsize::new(0);
@@ -147,6 +153,8 @@ fn concurrent_sessions_from_many_threads_stay_correct() {
     });
 
     assert_eq!(completed.load(Ordering::Relaxed), THREADS * ITERATIONS);
+
+    hsm.close_session(login_session).unwrap();
 }
 
 // ---- lifecycle ---------------------------------------------------------
@@ -1132,11 +1140,16 @@ fn private_objects_are_inaccessible_without_login() {
 
     // A private object and a public one, both session objects.
     let private_key = generate_secret_key(&hsm, session, 32, "secret");
+    // Secret keys are private by default, so the public one is explicit.
     let public_key = hsm
         .generate_key(
             session,
             &Mechanism::AesKeyGen,
-            vec![Attribute::ValueLen(32), Attribute::Label(String::from("public"))],
+            vec![
+                Attribute::ValueLen(32),
+                Attribute::Label(String::from("public")),
+                Attribute::Private(false),
+            ],
         )
         .unwrap();
 
@@ -1194,15 +1207,81 @@ fn creating_a_private_object_requires_login() {
         Err(HsmError::UserNotLoggedIn)
     ));
 
-    // ...but a public key is allowed.
+    // ...but an explicitly public key is allowed. (A secret key is private by
+    // default, so the public one must set CKA_PRIVATE=false.)
     assert!(
         hsm.generate_key(
             session,
             &Mechanism::AesKeyGen,
-            vec![Attribute::ValueLen(32), Attribute::Label(String::from("pub"))],
+            vec![
+                Attribute::ValueLen(32),
+                Attribute::Label(String::from("pub")),
+                Attribute::Private(false),
+            ],
         )
         .is_ok()
     );
+}
+
+#[test]
+fn write_paths_materialize_class_default_booleans() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // A secret key whose template sets only length/label plus one explicit flag.
+    let secret = hsm
+        .generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![
+                Attribute::ValueLen(32),
+                Attribute::Label(String::from("k")),
+                Attribute::Sign(true),
+            ],
+        )
+        .unwrap();
+
+    let read = |id: &ObjectId, type_| hsm.object_attribute(session, id.clone(), type_).unwrap();
+
+    // The class defaults are materialized for the booleans the template omitted...
+    assert_eq!(read(&secret, AttributeType::Token), Some(Attribute::Token(false)));
+    assert_eq!(read(&secret, AttributeType::Private), Some(Attribute::Private(true)));
+    assert_eq!(read(&secret, AttributeType::Sensitive), Some(Attribute::Sensitive(true)));
+    assert_eq!(
+        read(&secret, AttributeType::Extractable),
+        Some(Attribute::Extractable(false))
+    );
+    assert_eq!(read(&secret, AttributeType::Encrypt), Some(Attribute::Encrypt(false)));
+    assert_eq!(read(&secret, AttributeType::Derive), Some(Attribute::Derive(false)));
+    // ...but an explicit template value is never overwritten by its default.
+    assert_eq!(read(&secret, AttributeType::Sign), Some(Attribute::Sign(true)));
+
+    // The now-complete stored list lets an equality search on a defaulted
+    // attribute match — which the old presence-plus-equality match could not,
+    // since the template never stored CKA_ENCRYPT.
+    hsm.find_objects_init(
+        session,
+        vec![Attribute::Label(String::from("k")), Attribute::Encrypt(false)],
+    )
+    .unwrap();
+    let found = hsm.find_objects_next(session, 10).unwrap();
+    hsm.find_objects_final(session).unwrap();
+    assert_eq!(found, vec![secret]);
+
+    // Public keys default CKA_PRIVATE=false (so they need no login), unlike the
+    // private half of the pair.
+    let (public, private) = hsm
+        .generate_key_pair(
+            session,
+            &Mechanism::EcKeyPairGen,
+            vec![Attribute::Label(String::from("pub"))],
+            vec![Attribute::Label(String::from("priv"))],
+        )
+        .unwrap();
+    assert_eq!(read(&public, AttributeType::Private), Some(Attribute::Private(false)));
+    assert_eq!(read(&public, AttributeType::Verify), Some(Attribute::Verify(false)));
+    assert_eq!(read(&private, AttributeType::Private), Some(Attribute::Private(true)));
+    assert_eq!(read(&private, AttributeType::Sign), Some(Attribute::Sign(false)));
 }
 
 #[test]
@@ -1424,7 +1503,7 @@ fn create_ec_private_key_is_importable_and_signs() {
     let session = user_session(&hsm);
 
     // A known P-256 key: import its scalar (CKA_VALUE) as an EC private key.
-    let signing_key = p256::ecdsa::SigningKey::from_slice(&[0x42u8; 32]).unwrap();
+    let signing_key = ecdsa::SigningKey::from_slice(&[0x42u8; 32]).unwrap();
     let scalar = signing_key.to_bytes().to_vec();
     let verifying_key = *signing_key.verifying_key();
 
@@ -1453,7 +1532,7 @@ fn create_ec_private_key_is_importable_and_signs() {
     let digest = [0x11u8; 32];
     hsm.sign_init(session, &Mechanism::Ecdsa, private).unwrap();
     let signature = hsm.sign(session, &digest).unwrap();
-    let signature = p256::ecdsa::Signature::from_slice(&signature).unwrap();
+    let signature = ecdsa::Signature::from_slice(&signature).unwrap();
     verifying_key.verify_prehash(&digest, &signature).unwrap();
 }
 
@@ -1592,12 +1671,12 @@ fn object_attribute_returns_ec_point_of_public_key() {
     // Synthesized class and key type are readable on both halves.
     assert_eq!(
         hsm.object_attribute(session, public_key, AttributeType::Class).unwrap(),
-        Some(Attribute::Class(crate::attribute::ObjectClass::PublicKey))
+        Some(Attribute::Class(ObjectClass::PublicKey))
     );
     assert_eq!(
         hsm.object_attribute(session, private_key, AttributeType::KeyType)
             .unwrap(),
-        Some(Attribute::KeyType(crate::attribute::KeyType::Ec))
+        Some(Attribute::KeyType(KeyType::Ec))
     );
 }
 

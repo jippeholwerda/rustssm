@@ -14,7 +14,9 @@ Implemented (and exercised by the rust-cryptoki test suite):
   login, `C_InitPIN`, `C_SetPIN`. Private objects (`CKA_PRIVATE` true) are
   enforced per PKCS#11 §4.4: until the normal user is logged in they are
   excluded from `C_FindObjects` and cannot be created or accessed by handle
-  (`CKR_USER_NOT_LOGGED_IN`); public objects are unrestricted
+  (`CKR_USER_NOT_LOGGED_IN`); public objects are unrestricted. Secret and
+  private keys default to `CKA_PRIVATE` true (so they need a login to use),
+  public keys to false — set the attribute explicitly to override
 - Key generation: `CKM_GENERIC_SECRET_KEY_GEN`, `CKM_AES_KEY_GEN`,
   `CKM_RSA_PKCS_KEY_PAIR_GEN`, `CKM_EC_KEY_PAIR_GEN` (P-256)
 - Sign/verify: `CKM_RSA_PKCS`, `CKM_ECDSA`, `CKM_SHA256_HMAC` (single-part)

@@ -1423,15 +1423,35 @@ fn forbidden_downgrade(current: &[Attribute], update: &Attribute) -> bool {
     }
 }
 
-/// Merges token-synthesized/derived attributes into an application template,
-/// producing the attribute list persisted with the object. `CKA_VALUE` (the
-/// key material) and unrecognized attributes are dropped, and each derived
-/// attribute is added only when the template does not already carry that type
-/// so the application's choice wins.
+/// Merges token-synthesized/derived attributes into an application template, producing the attribute list persisted
+/// with the object. `CKA_VALUE` (the key material) and unrecognized attributes are dropped; each derived attribute and
+/// each class default is added only when the template does not already carry that type, so the application's choice
+/// wins. Every boolean attribute the object's class defines is present, so `ObjectStore::search` stays a plain
+/// presence-plus-equality match (a template like `CKA_PRIVATE = false` matches an object whose template never mentioned
+/// it, as it would against SoftHSM).
 fn merge_attributes(mut attributes: Vec<Attribute>, derived: Vec<Attribute>) -> Vec<Attribute> {
     attributes.retain(|attr| !matches!(attr, Attribute::Value(_) | Attribute::Unknown | Attribute::Unsupported));
 
-    for attribute in derived {
+    add_absent(&mut attributes, derived);
+
+    // The class is now settled (from the template or the derived list), so
+    // materialize the spec/token defaults for the boolean attributes the
+    // template left unset.
+    if let Some(class) = attributes.iter().find_map(|attr| match attr {
+        Attribute::Class(class) => Some(*class),
+        _ => None,
+    }) {
+        add_absent(&mut attributes, default_boolean_attributes(class));
+    }
+
+    attributes
+}
+
+/// Appends each of `additions` to `attributes` only if `attributes` does not
+/// already carry an attribute of that type, so an application-supplied value
+/// is never overwritten by a derived or default one.
+fn add_absent(attributes: &mut Vec<Attribute>, additions: Vec<Attribute>) {
+    for attribute in additions {
         let already_present = attribute.attribute_type().is_some_and(|type_| {
             attributes
                 .iter()
@@ -1441,8 +1461,51 @@ fn merge_attributes(mut attributes: Vec<Attribute>, derived: Vec<Attribute>) -> 
             attributes.push(attribute);
         }
     }
+}
 
-    attributes
+/// The boolean-attribute defaults that are used at object creation when
+/// the template omits them, keyed by object class. PKCS#11 fixes only
+/// `CKA_TOKEN` and `CKA_DERIVE` (both false); the rest are token-specific, and
+/// these are rustssm's documented choices — key material is private and
+/// sensitive by default, and usage flags are opt-in (an application enables the
+/// operations it needs). Applying these makes the stored attribute set complete
+/// so search and readback behave like SoftHSM's.
+fn default_boolean_attributes(class: ObjectClass) -> Vec<Attribute> {
+    // `CKA_TOKEN` (session object) is common to every storage object.
+    let mut defaults = vec![Attribute::Token(false), Attribute::Derive(false)];
+
+    match class {
+        ObjectClass::PublicKey => defaults.extend([
+            Attribute::Private(false),
+            Attribute::Encrypt(false),
+            Attribute::Verify(false),
+            Attribute::Wrap(false),
+        ]),
+        ObjectClass::PrivateKey => defaults.extend([
+            Attribute::Private(true),
+            Attribute::Sensitive(true),
+            Attribute::Extractable(false),
+            Attribute::Decrypt(false),
+            Attribute::Sign(false),
+            Attribute::Unwrap(false),
+        ]),
+        ObjectClass::SecretKey => defaults.extend([
+            Attribute::Private(true),
+            Attribute::Sensitive(true),
+            Attribute::Extractable(false),
+            Attribute::Encrypt(false),
+            Attribute::Decrypt(false),
+            Attribute::Sign(false),
+            Attribute::Verify(false),
+            Attribute::Wrap(false),
+            Attribute::Unwrap(false),
+        ]),
+        // A classless object is degenerate (the creating path rejects unknown
+        // classes); leave it as-is rather than guess a key's defaults.
+        ObjectClass::Unknown => return Vec::new(),
+    }
+
+    defaults
 }
 
 /// Reads the `CKA_VALUE` bytes from a template, which key-object creation
