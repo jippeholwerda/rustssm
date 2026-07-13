@@ -119,6 +119,59 @@ fn rv_from(error: HsmError) -> raw::CK_RV {
     }
 }
 
+/// The `CKR_*` name of a return value, for logging. Covers every code
+/// rustssm produces (the `rv_from` mapping plus the codes the FFI layer
+/// returns directly); anything else logs as "CKR_?" next to the hex.
+fn rv_name(rv: raw::CK_RV) -> &'static str {
+    match rv {
+        raw::CKR_CRYPTOKI_NOT_INITIALIZED => "CKR_CRYPTOKI_NOT_INITIALIZED",
+        raw::CKR_CRYPTOKI_ALREADY_INITIALIZED => "CKR_CRYPTOKI_ALREADY_INITIALIZED",
+        raw::CKR_SLOT_ID_INVALID => "CKR_SLOT_ID_INVALID",
+        raw::CKR_SESSION_HANDLE_INVALID => "CKR_SESSION_HANDLE_INVALID",
+        raw::CKR_SESSION_EXISTS => "CKR_SESSION_EXISTS",
+        raw::CKR_SESSION_READ_ONLY => "CKR_SESSION_READ_ONLY",
+        raw::CKR_SESSION_READ_ONLY_EXISTS => "CKR_SESSION_READ_ONLY_EXISTS",
+        raw::CKR_SESSION_PARALLEL_NOT_SUPPORTED => "CKR_SESSION_PARALLEL_NOT_SUPPORTED",
+        raw::CKR_USER_ALREADY_LOGGED_IN => "CKR_USER_ALREADY_LOGGED_IN",
+        raw::CKR_USER_ANOTHER_ALREADY_LOGGED_IN => "CKR_USER_ANOTHER_ALREADY_LOGGED_IN",
+        raw::CKR_USER_NOT_LOGGED_IN => "CKR_USER_NOT_LOGGED_IN",
+        raw::CKR_USER_PIN_NOT_INITIALIZED => "CKR_USER_PIN_NOT_INITIALIZED",
+        raw::CKR_USER_TYPE_INVALID => "CKR_USER_TYPE_INVALID",
+        raw::CKR_PIN_INCORRECT => "CKR_PIN_INCORRECT",
+        raw::CKR_OPERATION_ACTIVE => "CKR_OPERATION_ACTIVE",
+        raw::CKR_OPERATION_NOT_INITIALIZED => "CKR_OPERATION_NOT_INITIALIZED",
+        raw::CKR_MECHANISM_INVALID => "CKR_MECHANISM_INVALID",
+        raw::CKR_MECHANISM_PARAM_INVALID => "CKR_MECHANISM_PARAM_INVALID",
+        raw::CKR_TEMPLATE_INCOMPLETE => "CKR_TEMPLATE_INCOMPLETE",
+        raw::CKR_TEMPLATE_INCONSISTENT => "CKR_TEMPLATE_INCONSISTENT",
+        raw::CKR_ATTRIBUTE_VALUE_INVALID => "CKR_ATTRIBUTE_VALUE_INVALID",
+        raw::CKR_ATTRIBUTE_TYPE_INVALID => "CKR_ATTRIBUTE_TYPE_INVALID",
+        raw::CKR_ATTRIBUTE_READ_ONLY => "CKR_ATTRIBUTE_READ_ONLY",
+        raw::CKR_ATTRIBUTE_SENSITIVE => "CKR_ATTRIBUTE_SENSITIVE",
+        raw::CKR_KEY_HANDLE_INVALID => "CKR_KEY_HANDLE_INVALID",
+        raw::CKR_KEY_SIZE_RANGE => "CKR_KEY_SIZE_RANGE",
+        raw::CKR_WRAPPING_KEY_HANDLE_INVALID => "CKR_WRAPPING_KEY_HANDLE_INVALID",
+        raw::CKR_WRAPPING_KEY_SIZE_RANGE => "CKR_WRAPPING_KEY_SIZE_RANGE",
+        raw::CKR_UNWRAPPING_KEY_HANDLE_INVALID => "CKR_UNWRAPPING_KEY_HANDLE_INVALID",
+        raw::CKR_UNWRAPPING_KEY_SIZE_RANGE => "CKR_UNWRAPPING_KEY_SIZE_RANGE",
+        raw::CKR_WRAPPED_KEY_INVALID => "CKR_WRAPPED_KEY_INVALID",
+        raw::CKR_WRAPPED_KEY_LEN_RANGE => "CKR_WRAPPED_KEY_LEN_RANGE",
+        raw::CKR_OBJECT_HANDLE_INVALID => "CKR_OBJECT_HANDLE_INVALID",
+        raw::CKR_SIGNATURE_INVALID => "CKR_SIGNATURE_INVALID",
+        raw::CKR_DATA_LEN_RANGE => "CKR_DATA_LEN_RANGE",
+        raw::CKR_ENCRYPTED_DATA_LEN_RANGE => "CKR_ENCRYPTED_DATA_LEN_RANGE",
+        raw::CKR_ENCRYPTED_DATA_INVALID => "CKR_ENCRYPTED_DATA_INVALID",
+        raw::CKR_CURVE_NOT_SUPPORTED => "CKR_CURVE_NOT_SUPPORTED",
+        raw::CKR_BUFFER_TOO_SMALL => "CKR_BUFFER_TOO_SMALL",
+        raw::CKR_ARGUMENTS_BAD => "CKR_ARGUMENTS_BAD",
+        raw::CKR_NO_EVENT => "CKR_NO_EVENT",
+        raw::CKR_FUNCTION_NOT_SUPPORTED => "CKR_FUNCTION_NOT_SUPPORTED",
+        raw::CKR_DEVICE_ERROR => "CKR_DEVICE_ERROR",
+        raw::CKR_GENERAL_ERROR => "CKR_GENERAL_ERROR",
+        _ => "CKR_?",
+    }
+}
+
 /// Runs `f` and converts its result to a `CK_RV`, logging non-OK returns.
 fn ck<F>(name: &str, f: F) -> raw::CK_RV
 where
@@ -127,7 +180,7 @@ where
     match f() {
         Ok(()) => raw::CKR_OK,
         Err(rv) => {
-            debug!("{name} returned 0x{rv:08x}");
+            debug!("{name} returned {} (0x{rv:08x})", rv_name(rv));
             rv
         }
     }
@@ -1784,6 +1837,15 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(len, 4);
         assert_eq!(&buffer[..4], &data);
+    }
+
+    #[test]
+    fn rv_name_maps_known_codes_and_tolerates_unknown_ones() {
+        assert_eq!(rv_name(raw::CKR_DATA_LEN_RANGE), "CKR_DATA_LEN_RANGE");
+        assert_eq!(rv_name(raw::CKR_USER_NOT_LOGGED_IN), "CKR_USER_NOT_LOGGED_IN");
+        // A code rustssm never produces still logs, name unknown but with the
+        // hex value alongside it in `ck()`.
+        assert_eq!(rv_name(raw::CKR_VENDOR_DEFINED), "CKR_?");
     }
 
     #[test]
