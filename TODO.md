@@ -267,33 +267,72 @@ multipart operations.
       move full template matching into SQL (attribute table / JSON1): that
       duplicates the matching semantics in a second encoding that must agree
       with `Attribute` equality forever, and a divergence returns the wrong
-      key handle.
+      key handle. Note: since the search scan doesn't use SQL, this raised
+      "why SQLite at all?" — see the storage-mechanism decision below.
 
-- [ ] **Switch persisted object records from postcard to CBOR** (ciborium).
-      postcard encodes enums by discriminant index and struct fields
+- [x] **Keep SQLite as the storage mechanism** (decided 2026-07-13; no code
+      change). With search matching in Rust and records as opaque CBOR blobs,
+      SQLite is not used as a relational database — and that is fine: it is
+      used as a transactional, multi-process-safe file format ("SQLite
+      competes with `fopen()`"). What it earns its keep with, and what a
+      single-CBOR-file store would have to hand-roll: (1) torn-write
+      impossibility under the crash-only policy — a panic may abort
+      mid-mutation at any time, and WAL journaling is what makes that stance
+      safe; a flat file needs the full temp+fsync+rename+dir-fsync dance on
+      every write, done perfectly, in a key store where corruption is the
+      worst outcome; (2) cross-process locking and visibility —
+      `rustssm-util` writes to a store a loaded module reads, and the
+      SoftHSM-style deployment has several processes sharing one store;
+      read-modify-rewrite of a single file gives lost updates without
+      flock+reload machinery that would amount to a worse database;
+      (3) never-reused monotonic handles via `AUTOINCREMENT` rowids;
+      (4) per-object deletes, `sqlite3` inspectability, and the documented
+      label pre-filter escalation path. The SQL surface is seven short
+      statements in one file, and `ObjectStore`'s API is storage-agnostic, so
+      the decision is reversible if single-process access ever becomes
+      guaranteed. Two nits this analysis surfaced are filed in section 4
+      (non-transactional `generate_key_pair` writes; `C_Initialize` session
+      purge vs. multi-process).
+
+- [x] **Switch persisted object records from postcard to CBOR** (ciborium).
+      postcard encoded enums by discriminant index and struct fields
       positionally, with no names or framing — so reordering/inserting a
-      variant in the now-persisted `Attribute`/`ObjectClass`/`KeyType` enums (or
-      adding an `ObjectRecord` field) silently misreads previously-stored
-      objects. postcard's niche (embedded / `no_std` / serial wire) does not
-      match a desktop HSM persisting into local SQLite; CBOR is self-describing
-      and tolerant of schema evolution. Scope is isolated to the object BLOB
-      (token state already lives in typed SQL columns). While doing it, collapse
-      the double serialization (key material is postcard'd, then the wrapping
-      `ObjectRecord` is postcard'd again). Interim mitigation if deferred: a
-      stored format-version guard plus an append-only rule for those enums.
+      variant in the persisted `Attribute`/`ObjectClass`/`KeyType` enums (or
+      adding an `ObjectRecord` field) silently misread previously-stored
+      objects. The object blob is now a **version byte** (`0x01`) followed by
+      one self-describing CBOR document: struct fields and enum variants are
+      encoded by *name* (pinned by `records_encode_attribute_variants_by_name`),
+      so schema evolution is tolerated (pinned by
+      `record_decoding_tolerates_unknown_fields`, which decodes a record
+      carrying a field from "the future"), and an unknown version byte or a
+      pre-CBOR blob fails loudly with `ObjectStoreError::UnsupportedFormat`
+      rather than being misread (pinned by
+      `unknown_record_format_is_rejected_loudly`). The double serialization is
+      collapsed: the typed key material is embedded in the same CBOR document
+      (`NewObjectRecord<T>` on the write path, `material: ciborium::Value` on
+      the read path, decoded into its concrete key type on demand by
+      `ObjectParts::material`). Scope stayed isolated to the object BLOB
+      (token state lives in typed SQL columns). **Deliberate format break, no
+      migration**: there are no live rustssm stores (same call as the
+      `owner_session` column); existing test/devenv DBs must be re-provisioned
+      — the rust-cryptoki and nl-wallet suites were re-run against fresh
+      stores (44/32 and 5/5, both unchanged). postcard is dropped from
+      Cargo.toml; ciborium added.
 
-- [ ] **Richer error logging at the FFI boundary.** `ck()` logs every non-OK
-      return as a bare hex code (`debug!("{name} returned 0x{rv:08x}")`), e.g.
-      `C_Sign returned 0x00000021` rather than `CKR_DATA_LEN_RANGE` — so failures
-      are traceable only at `debug` level and only by decoding the hex by hand.
-      Map the `CK_RV` to its `CKR_*` name in that one `debug!` (a lookup table)
-      so it benefits every function. Note the deliberate current convention:
-      the domain layer is log-free except `object_store` (device/DB failures,
-      surfaced via the `warn!` in `rv_from`); the FFI layer owns return-code
-      logging. Domain input-rejection reasons (e.g. *why* a sign was
-      `DataLenRange`) are not logged because the crypto traits return
-      `Option`/`bool` and discard the reason — surfacing those would be a
-      separate logging-policy change, not just this table.
+- [x] **Richer error logging at the FFI boundary.** `ck()` now logs
+      `C_Sign returned CKR_DATA_LEN_RANGE (0x00000021)` instead of the bare
+      hex: `rv_name` in `lib.rs` maps every code rustssm produces (the
+      `rv_from` mapping plus the FFI layer's direct returns) to its `CKR_*`
+      name, with `"CKR_?"` + the hex for anything else. The deliberate
+      logging convention stands: the domain layer is log-free except
+      `object_store` (device/DB failures, surfaced via the `warn!` in
+      `rv_from`); the FFI layer owns return-code logging. Domain
+      input-rejection reasons (e.g. *why* a sign was `DataLenRange`) are
+      still not logged because the crypto traits return `Option`/`bool` and
+      discard the reason — surfacing those would be a separate logging-policy
+      change. Covered by
+      `rv_name_maps_known_codes_and_tolerates_unknown_ones` and verified
+      rendered through the `.so` (`RUSTSSM_LOG=debug` on the FFI test).
 
 ## 4. Code review findings (2026-07-09)
 
@@ -450,3 +489,58 @@ Ranked; being worked one at a time.
       `imported_key_carries_class_defaults` (CKA_SENSITIVE reads back true,
       findable by a Sensitive(true) template) and the full existing suite (121
       tests).
+- [ ] **`CKA_VALUE` readback on objects that never carry a value** — the
+      `C_GetAttributeValue` branch in `lib.rs` keys on the *attribute type*:
+      any object lacking a stored `Value` reports `CKR_ATTRIBUTE_SENSITIVE`,
+      including objects that never have one (a metadata-only RSA public key).
+      Spec-precise behavior is `CKR_ATTRIBUTE_SENSITIVE` only when a value
+      exists but is withheld (secret keys, EC private keys) and
+      `CKR_ATTRIBUTE_TYPE_INVALID` otherwise. Fix needs a per-class notion of
+      "carries `CKA_VALUE`" — decide from the object's stored `CKA_CLASS`
+      (public keys → type-invalid, secret/private keys → sensitive). Harmless
+      in practice (clients treat both as "unavailable"); precision only.
+- [ ] **Usage flags are not enforced — decide and document** — `C_SignInit`
+      signs with a key whose `CKA_SIGN` is false, `C_EncryptInit` ignores
+      `CKA_ENCRYPT`, `C_WrapKey` ignores `CKA_WRAP`, etc.; the spec wants
+      `CKR_KEY_FUNCTION_NOT_PERMITTED`. This became *visible* (not new) when
+      class defaults landed: an unwrapped signing key now demonstrably stores
+      `CKA_SIGN = false` (nl-wallet's unwrap template omits it) and signing
+      still succeeds. Enforcing would therefore break nl-wallet's
+      `sign_wrapped` flow until their template adds `Sign(true)` — a
+      coordinated change. Until then, this is a deliberate non-feature; if
+      enforcement stays out, say so in the README error-policy/status section
+      the way other deviations are documented.
+- [ ] **`C_SetAttributeValue` skips the one-way guarantees** — the set path
+      calls `apply_attribute_updates(.., enforce_one_way: false)`, so
+      `CKA_SENSITIVE` true→false and `CKA_EXTRACTABLE` false→true are allowed
+      through an attribute update even though `C_CopyObject` forbids exactly
+      those transitions (and SoftHSM forbids them on set too). Fix is
+      one argument (`true`) in `set_object_attributes` plus a test; check the
+      rust-cryptoki `update_attributes_key` test still passes, since that is
+      the suite's main `C_SetAttributeValue` consumer.
+- [ ] **`generate_key_pair` writes the two halves without a transaction** —
+      the private key row is inserted first, then the public one, as two
+      independent `INSERT`s. Under the crash-only policy a panic can abort the
+      process between them, leaving an orphaned private-key object that is
+      findable by label but has no public half. SQLite makes the fix cheap: a
+      store-level paired write (e.g. `write_pair`) that inserts both records
+      inside one transaction, threaded through `Session` and used by both
+      `generate_key_pair` arms. (Noted while deciding to keep SQLite: this is
+      exactly the kind of multi-object atomicity the database provides and a
+      flat-file store would have to reinvent.)
+- [ ] **`C_Initialize` purges *all* session objects — a single-process
+      assumption** — `purge_session_objects` deletes every row with
+      `owner_session IS NOT NULL`, which is correct crash recovery when one
+      process owns the store, but in a multi-process deployment (several
+      services loading the `.so` against one store, the SoftHSM devenv model)
+      a second process calling `C_Initialize` destroys the first process's
+      *live* session objects — its session keys vanish mid-use
+      (`CKR_OBJECT_HANDLE_INVALID` on next access). SoftHSM avoids this by
+      keeping session objects in memory only. Until this is addressed, the
+      supported model is effectively one module process per store at a time
+      (fine for nextest's process-per-test isolation and the current single
+      consumer). Candidate fixes, in rough order of preference: keep session
+      objects in memory (matches SoftHSM semantics; session objects never
+      touch SQLite, so crash orphans become impossible by construction), or
+      tag `owner_session` rows with a process identity and purge only your
+      own leftovers (needs care around PID reuse).

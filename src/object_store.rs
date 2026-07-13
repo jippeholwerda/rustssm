@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use ciborium::Value;
 use log::info;
 use rusqlite::params;
 use rusqlite::Connection;
@@ -15,8 +16,16 @@ use crate::util::random_string;
 
 #[derive(Error, Debug)]
 pub enum ObjectStoreError {
-    #[error("serialization/deserialization error {0:?}")]
-    Serialize(#[source] postcard::Error),
+    #[error("serialization error {0:?}")]
+    Serialize(#[source] ciborium::ser::Error<std::io::Error>),
+
+    #[error("deserialization error {0:?}")]
+    Deserialize(#[source] ciborium::de::Error<std::io::Error>),
+
+    /// The object blob's version byte is not one this build understands
+    /// (`0` doubles for an empty blob, which no version of rustssm writes).
+    #[error("unsupported object record format: version byte {0}")]
+    UnsupportedFormat(u8),
 
     #[error("database error {0:?}")]
     Database(#[source] rusqlite::Error),
@@ -74,13 +83,54 @@ fn apply_schema(connection: &Connection) -> Result<(), ObjectStoreError> {
     Ok(())
 }
 
+/// Version byte prefixed to every object blob, so a future format break is
+/// detected loudly (`ObjectStoreError::UnsupportedFormat`) instead of being
+/// misread. Version 1 is self-describing CBOR: struct fields and enum
+/// variants are encoded by *name*, so reordering or appending
+/// `Attribute`/`ObjectClass`/`KeyType` variants (or adding a record field)
+/// leaves previously-stored objects readable.
+const OBJECT_RECORD_FORMAT_V1: u8 = 1;
+
 /// The persisted form of an object: its full typed attribute list (the
 /// creation template merged with token-synthesized and derived attributes)
-/// together with the serialized key material used by crypto operations.
+/// together with the key material used by crypto operations. The material is
+/// embedded as a CBOR value in the same document — one encoding, decoded into
+/// its concrete key type on demand — rather than a serialized byte blob
+/// inside the record.
 #[derive(Debug, Serialize, Deserialize)]
 struct ObjectRecord {
     attributes: Vec<Attribute>,
-    material: Vec<u8>,
+    material: Value,
+}
+
+/// View of [`ObjectRecord`] used for writing: the typed key material is serialized
+/// in place, in one pass. Field names must match `ObjectRecord`.
+#[derive(Serialize)]
+struct NewObjectRecord<'a, T>
+where
+    T: Serialize + ?Sized,
+{
+    attributes: &'a [Attribute],
+    material: &'a T,
+}
+
+/// Encodes a record as a version-prefixed object blob.
+fn encode_content<T>(record: &T) -> Result<Vec<u8>, ObjectStoreError>
+where
+    T: Serialize,
+{
+    let mut content = vec![OBJECT_RECORD_FORMAT_V1];
+    ciborium::into_writer(record, &mut content).map_err(ObjectStoreError::Serialize)?;
+    Ok(content)
+}
+
+/// Decodes a version-prefixed object blob.
+fn decode_content(content: &[u8]) -> Result<ObjectRecord, ObjectStoreError> {
+    match content.split_first() {
+        Some((&OBJECT_RECORD_FORMAT_V1, cbor)) => ciborium::from_reader(cbor).map_err(ObjectStoreError::Deserialize),
+        Some((&version, _)) => Err(ObjectStoreError::UnsupportedFormat(version)),
+        None => Err(ObjectStoreError::UnsupportedFormat(0)),
+    }
 }
 
 /// Persisted per-slot token state. A row exists exactly when the token is
@@ -170,11 +220,12 @@ impl ObjectStore {
     where
         T: Serialize + ?Sized,
     {
-        let material = postcard::to_allocvec(&material).map_err(ObjectStoreError::Serialize)?;
-
         let (private, label) = indexed_columns(&attributes);
-        let record = ObjectRecord { attributes, material };
-        let content = postcard::to_allocvec(&record).map_err(ObjectStoreError::Serialize)?;
+        let record = NewObjectRecord {
+            attributes: &attributes,
+            material,
+        };
+        let content = encode_content(&record)?;
 
         let connection = self.connection.lock().unwrap();
         connection
@@ -187,9 +238,9 @@ impl ObjectStore {
         Ok(ObjectId(connection.last_insert_rowid() as u64))
     }
 
-    /// Returns an object's stored attribute list together with its serialized
-    /// key material, in a single read.
-    pub fn read_parts(&self, object_id: &ObjectId) -> Result<(Vec<Attribute>, Vec<u8>), ObjectStoreError> {
+    /// Returns an object's stored attribute list together with its key
+    /// material (as an undecoded CBOR value), in a single read.
+    pub fn read_parts(&self, object_id: &ObjectId) -> Result<(Vec<Attribute>, Value), ObjectStoreError> {
         let record = self.read_record(object_id)?;
         Ok((record.attributes, record.material))
     }
@@ -207,7 +258,7 @@ impl ObjectStore {
 
         let (private, label) = indexed_columns(&attributes);
         record.attributes = attributes;
-        let content = postcard::to_allocvec(&record).map_err(ObjectStoreError::Serialize)?;
+        let content = encode_content(&record)?;
 
         let id = object_id.0 as i64;
         let connection = self.connection.lock().unwrap();
@@ -238,7 +289,7 @@ impl ObjectStore {
 
         let (private, label) = indexed_columns(&attributes);
         record.attributes = attributes;
-        let content = postcard::to_allocvec(&record).map_err(ObjectStoreError::Serialize)?;
+        let content = encode_content(&record)?;
 
         let connection = self.connection.lock().unwrap();
         connection
@@ -253,7 +304,7 @@ impl ObjectStore {
 
     fn read_record(&self, object_id: &ObjectId) -> Result<ObjectRecord, ObjectStoreError> {
         let content = self.read_raw(object_id)?;
-        postcard::from_bytes(&content).map_err(ObjectStoreError::Serialize)
+        decode_content(&content)
     }
 
     pub fn read_raw(&self, object_id: &ObjectId) -> Result<Vec<u8>, ObjectStoreError> {
@@ -343,7 +394,7 @@ impl ObjectStore {
         let mut ids = Vec::new();
         for row in rows {
             let (id, content) = row.map_err(ObjectStoreError::Database)?;
-            let record: ObjectRecord = postcard::from_bytes(&content).map_err(ObjectStoreError::Serialize)?;
+            let record = decode_content(&content)?;
 
             if !include_private
                 && record
@@ -432,7 +483,10 @@ mod tests {
     use p256::ecdsa;
 
     use crate::attribute::Attribute;
+    use crate::object_store::ObjectId;
     use crate::object_store::ObjectStore;
+    use crate::object_store::ObjectStoreError;
+    use crate::object_store::OBJECT_RECORD_FORMAT_V1;
 
     #[test]
     fn store_read_delete_roundtrip() {
@@ -450,13 +504,92 @@ mod tests {
             .unwrap();
 
         let (_attributes, material) = store.read_parts(&id).unwrap();
-        let stored_bytes: Vec<u8> = postcard::from_bytes(&material).unwrap();
+        let stored_bytes: Vec<u8> = material.deserialized().unwrap();
         let stored_key = ecdsa::SigningKey::from_slice(&stored_bytes).unwrap();
 
         assert_eq!(key, stored_key);
 
         store.delete(&id).unwrap();
         assert!(store.read_raw(&id).is_err());
+    }
+
+    /// Inserts a raw content blob, bypassing the store's encoding. Simulates
+    /// blobs written by a different (older or newer) rustssm build.
+    fn insert_raw_content(store: &ObjectStore, content: &[u8]) -> ObjectId {
+        let connection = store.connection.lock().unwrap();
+        connection
+            .execute(
+                "insert into object (content, private, label) values (?1, 0, 'raw')",
+                rusqlite::params![content],
+            )
+            .unwrap();
+        ObjectId(connection.last_insert_rowid() as u64)
+    }
+
+    #[test]
+    fn unknown_record_format_is_rejected_loudly() {
+        let store = ObjectStore::in_memory().unwrap();
+
+        // A blob with a version byte this build does not know (e.g. a future
+        // format, or a pre-CBOR postcard record that happens to start with
+        // 0xff) must fail with UnsupportedFormat — never be misread.
+        let id = insert_raw_content(&store, &[0xff, 0x01, 0x02]);
+        assert!(matches!(
+            store.read_parts(&id).unwrap_err(),
+            ObjectStoreError::UnsupportedFormat(0xff)
+        ));
+
+        // An empty blob reports version 0 (which nothing ever writes).
+        let empty = insert_raw_content(&store, &[]);
+        assert!(matches!(
+            store.read_parts(&empty).unwrap_err(),
+            ObjectStoreError::UnsupportedFormat(0)
+        ));
+    }
+
+    #[test]
+    fn record_decoding_tolerates_unknown_fields() {
+        use ciborium::Value;
+
+        // Simulate a record written by a future rustssm whose ObjectRecord
+        // gained a field: self-describing CBOR with named fields must still
+        // decode into today's struct, ignoring what it does not know. This is
+        // the schema-evolution property the postcard→CBOR migration buys.
+        let value = Value::Map(vec![
+            (
+                Value::Text(String::from("attributes")),
+                Value::serialized(&vec![Attribute::Label(String::from("from-the-future"))]).unwrap(),
+            ),
+            (
+                Value::Text(String::from("material")),
+                Value::serialized(&vec![0u8; 4]).unwrap(),
+            ),
+            (Value::Text(String::from("added_in_v2")), Value::Bool(true)),
+        ]);
+        let mut content = vec![OBJECT_RECORD_FORMAT_V1];
+        ciborium::into_writer(&value, &mut content).unwrap();
+
+        let store = ObjectStore::in_memory().unwrap();
+        let id = insert_raw_content(&store, &content);
+
+        let (attributes, material) = store.read_parts(&id).unwrap();
+        assert_eq!(attributes, vec![Attribute::Label(String::from("from-the-future"))]);
+        assert_eq!(material.deserialized::<Vec<u8>>().unwrap(), vec![0u8; 4]);
+    }
+
+    #[test]
+    fn records_encode_attribute_variants_by_name() {
+        let store = ObjectStore::in_memory().unwrap();
+        let id = store
+            .write(vec![Attribute::Label(String::from("named"))], &[0u8; 4][..], None)
+            .unwrap();
+
+        // The blob must carry the variant *name*, not a positional
+        // discriminant — that is what makes reordering/appending Attribute
+        // variants safe for already-stored objects.
+        let content = store.read_raw(&id).unwrap();
+        assert_eq!(content[0], OBJECT_RECORD_FORMAT_V1);
+        assert!(content.windows(5).any(|window| window == b"Label"));
     }
 
     #[test]

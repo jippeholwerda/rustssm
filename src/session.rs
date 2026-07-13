@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use ciborium::Value;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use thiserror::Error;
@@ -44,12 +45,12 @@ pub struct Session {
     pub search_operation: OnceLock<SearchOperation>,
 }
 
-/// An object's stored attribute list together with its raw serialized key
-/// material, read from the store in one access. The material is decoded on
-/// demand, so callers that only need attributes pay no decode.
+/// An object's stored attribute list together with its key material (an
+/// undecoded CBOR value), read from the store in one access. The material is
+/// decoded into its concrete key type on demand.
 pub struct ObjectParts {
     pub attributes: Vec<Attribute>,
-    material: Vec<u8>,
+    material: Value,
 }
 
 impl ObjectParts {
@@ -59,7 +60,7 @@ impl ObjectParts {
     where
         T: DeserializeOwned,
     {
-        postcard::from_bytes(&self.material).ok()
+        self.material.deserialized().ok()
     }
 }
 

@@ -545,7 +545,7 @@ fn generate_aes_key_produces_usable_key() {
             .unwrap();
 
         let (_, material) = hsm.object_store().unwrap().read_parts(&key).unwrap();
-        let key_bytes: Vec<u8> = postcard::from_bytes(&material).unwrap();
+        let key_bytes: Vec<u8> = material.deserialized().unwrap();
         assert_eq!(key_bytes.len(), length as usize);
     }
 }
@@ -877,7 +877,7 @@ fn aes_gcm_encryption_matches_reference_implementation() {
     let key = generate_secret_key(&hsm, session, 32, "aes key");
 
     let (_, material) = hsm.object_store().unwrap().read_parts(&key).unwrap();
-    let key_bytes: Vec<u8> = postcard::from_bytes(&material).unwrap();
+    let key_bytes: Vec<u8> = material.deserialized().unwrap();
     let iv = [0x42u8; 12];
     let aad = b"header".to_vec();
     let plaintext = b"attack at dawn";
@@ -958,7 +958,7 @@ fn aes_gcm_with_32_byte_iv_roundtrips_and_matches_reference() {
     let session = user_session(&hsm);
     let key = generate_secret_key(&hsm, session, 32, "aes key");
     let (_, material) = hsm.object_store().unwrap().read_parts(&key).unwrap();
-    let key_bytes: Vec<u8> = postcard::from_bytes(&material).unwrap();
+    let key_bytes: Vec<u8> = material.deserialized().unwrap();
 
     let iv = [0x17u8; 32];
     let plaintext = b"attack at dawn";
@@ -1462,7 +1462,7 @@ fn create_secret_key_object_is_stored_and_usable() {
 
     // Stored verbatim and usable as an AES key.
     let (_, material) = hsm.object_store().unwrap().read_parts(&object).unwrap();
-    let stored: Vec<u8> = postcard::from_bytes(&material).unwrap();
+    let stored: Vec<u8> = material.deserialized().unwrap();
     assert_eq!(stored, key_bytes);
 
     hsm.find_objects_init(session, vec![Attribute::Label(String::from("created"))])
@@ -2073,10 +2073,10 @@ fn copy_object_duplicates_material_and_applies_overrides() {
         .unwrap();
     assert_ne!(copy, source);
 
-    let (_, source_material_bytes) = hsm.object_store().unwrap().read_parts(&source).unwrap();
-    let source_material: Vec<u8> = postcard::from_bytes(&source_material_bytes).unwrap();
-    let (_, copy_material_bytes) = hsm.object_store().unwrap().read_parts(&copy).unwrap();
-    let copy_material: Vec<u8> = postcard::from_bytes(&copy_material_bytes).unwrap();
+    let (_, source_material) = hsm.object_store().unwrap().read_parts(&source).unwrap();
+    let source_material: Vec<u8> = source_material.deserialized().unwrap();
+    let (_, copy_material) = hsm.object_store().unwrap().read_parts(&copy).unwrap();
+    let copy_material: Vec<u8> = copy_material.deserialized().unwrap();
     assert_eq!(source_material, copy_material);
 
     assert_eq!(
