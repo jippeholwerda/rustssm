@@ -488,16 +488,18 @@ Ranked; being worked one at a time.
       `imported_key_carries_class_defaults` (CKA_SENSITIVE reads back true,
       findable by a Sensitive(true) template) and the full existing suite (121
       tests).
-- [ ] **`CKA_VALUE` readback on objects that never carry a value** — the
-      `C_GetAttributeValue` branch in `lib.rs` keys on the *attribute type*:
-      any object lacking a stored `Value` reports `CKR_ATTRIBUTE_SENSITIVE`,
-      including objects that never have one (a metadata-only RSA public key).
-      Spec-precise behavior is `CKR_ATTRIBUTE_SENSITIVE` only when a value
-      exists but is withheld (secret keys, EC private keys) and
-      `CKR_ATTRIBUTE_TYPE_INVALID` otherwise. Fix needs a per-class notion of
-      "carries `CKA_VALUE`" — decide from the object's stored `CKA_CLASS`
-      (public keys → type-invalid, secret/private keys → sensitive). Harmless
-      in practice (clients treat both as "unavailable"); precision only.
+- [x] **`CKA_VALUE` readback on objects that never carry a value** — decided
+      2026-07-15: won't fix. The `C_GetAttributeValue` branch in `lib.rs` keys
+      on the *attribute type*: any object lacking a stored `Value` reports
+      `CKR_ATTRIBUTE_SENSITIVE`, including objects that never have one (a
+      metadata-only RSA public key), where spec-precise behavior would be
+      `CKR_ATTRIBUTE_TYPE_INVALID`. Both codes follow the same output
+      convention (`ulValueLen = CK_UNAVAILABLE_INFORMATION`), so every client
+      treats them identically as "unavailable"; erring toward "sensitive" is
+      the harmless direction, and the fix would thread a per-class "carries
+      `CKA_VALUE`" notion through the readback path — complexity buying a
+      distinction nothing observes. Revisit only if a client ever
+      programmatically distinguishes the two codes.
 - [x] **Usage flags are not enforced — decide and document** — resolved
       2026-07-15 the compliant way, after measuring SoftHSM 2.6.1 (probe via
       rust-cryptoki against the nix-store module): SoftHSM *enforces* the
