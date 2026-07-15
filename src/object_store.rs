@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::attribute::matches_template;
 use crate::attribute::Attribute;
 use crate::raw::CK_OBJECT_HANDLE;
 use crate::util::random_string;
@@ -34,12 +35,26 @@ pub enum ObjectStoreError {
     NotFound(ObjectId),
 }
 
-#[derive(Debug, Hash, Clone, Eq, PartialEq)]
+/// The object-handle space is partitioned between the two object stores by
+/// the top bit: SQLite rowids are positive `i64` (bit 63 always clear), so
+/// handles with this bit set denote in-memory session objects (allocated by
+/// [`crate::session::SessionObjects`]). The partition requires a 64-bit
+/// `CK_OBJECT_HANDLE` to survive the FFI boundary, which the assert pins.
+pub const SESSION_OBJECT_HANDLE_BIT: u64 = 1 << 63;
+const _: () = assert!(std::mem::size_of::<CK_OBJECT_HANDLE>() == 8);
+
+#[derive(Debug, Hash, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct ObjectId(u64);
 
 impl ObjectId {
     pub fn new(id: u64) -> Self {
         Self(id)
+    }
+
+    /// Whether this handle denotes an in-memory session object rather than a
+    /// persisted token object.
+    pub fn is_session_object(&self) -> bool {
+        self.0 & SESSION_OBJECT_HANDLE_BIT != 0
     }
 }
 
@@ -205,18 +220,13 @@ impl ObjectStore {
         })
     }
 
-    /// Persists key `material` under its full typed attribute list. `owner` is
-    /// `None` for a token object and `Some(session_id)` for a session object
-    /// (which is deleted when that session closes). The `private` and `label`
-    /// columns are derived from the attributes purely for legacy indexing;
-    /// matching is done against the stored attribute list (see
-    /// [`ObjectStore::search`]).
-    pub fn write<T>(
-        &self,
-        attributes: Vec<Attribute>,
-        material: &T,
-        owner: Option<u64>,
-    ) -> Result<ObjectId, ObjectStoreError>
+    /// Persists key `material` under its full typed attribute list. Only
+    /// token objects (`CKA_TOKEN` true) reach the store — session objects
+    /// live in process memory (see [`crate::session::SessionObjects`]). The
+    /// `private` and `label` columns are derived from the attributes purely
+    /// for legacy indexing; matching is done against the stored attribute
+    /// list (see [`ObjectStore::search`]).
+    pub fn write<T>(&self, attributes: Vec<Attribute>, material: &T) -> Result<ObjectId, ObjectStoreError>
     where
         T: Serialize + ?Sized,
     {
@@ -230,8 +240,8 @@ impl ObjectStore {
         let connection = self.connection.lock().unwrap();
         connection
             .execute(
-                "insert into object (content, private, label, owner_session) values (?1, ?2, ?3, ?4)",
-                params![content, private, label, owner.map(|id| id as i64)],
+                "insert into object (content, private, label) values (?1, ?2, ?3)",
+                params![content, private, label],
             )
             .map_err(ObjectStoreError::Database)?;
 
@@ -246,14 +256,8 @@ impl ObjectStore {
     }
 
     /// Replaces an object's stored attribute list, preserving its key
-    /// material. `owner` reflects the object's post-update persistence
-    /// (`None` = token object), so changing `CKA_TOKEN` re-homes the row.
-    pub fn set_attributes(
-        &self,
-        object_id: &ObjectId,
-        attributes: Vec<Attribute>,
-        owner: Option<u64>,
-    ) -> Result<(), ObjectStoreError> {
+    /// material.
+    pub fn set_attributes(&self, object_id: &ObjectId, attributes: Vec<Attribute>) -> Result<(), ObjectStoreError> {
         let mut record = self.read_record(object_id)?;
 
         let (private, label) = indexed_columns(&attributes);
@@ -264,8 +268,8 @@ impl ObjectStore {
         let connection = self.connection.lock().unwrap();
         let updated = connection
             .execute(
-                "update object set content = ?2, private = ?3, label = ?4, owner_session = ?5 where id = ?1",
-                params![id, content, private, label, owner.map(|id| id as i64)],
+                "update object set content = ?2, private = ?3, label = ?4 where id = ?1",
+                params![id, content, private, label],
             )
             .map_err(ObjectStoreError::Database)?;
 
@@ -274,32 +278,6 @@ impl ObjectStore {
         }
 
         Ok(())
-    }
-
-    /// Duplicates an object's key material into a new row under a fresh
-    /// attribute list, returning the new id. `owner` reflects the copy's
-    /// persistence (`None` = token object).
-    pub fn copy(
-        &self,
-        source: &ObjectId,
-        attributes: Vec<Attribute>,
-        owner: Option<u64>,
-    ) -> Result<ObjectId, ObjectStoreError> {
-        let mut record = self.read_record(source)?;
-
-        let (private, label) = indexed_columns(&attributes);
-        record.attributes = attributes;
-        let content = encode_content(&record)?;
-
-        let connection = self.connection.lock().unwrap();
-        connection
-            .execute(
-                "insert into object (content, private, label, owner_session) values (?1, ?2, ?3, ?4)",
-                params![content, private, label, owner.map(|id| id as i64)],
-            )
-            .map_err(ObjectStoreError::Database)?;
-
-        Ok(ObjectId(connection.last_insert_rowid() as u64))
     }
 
     fn read_record(&self, object_id: &ObjectId) -> Result<ObjectRecord, ObjectStoreError> {
@@ -344,27 +322,6 @@ impl ObjectStore {
         Ok(())
     }
 
-    /// Deletes the session objects owned by `owner`, called when that session
-    /// closes.
-    pub fn delete_session_objects(&self, owner: u64) -> Result<(), ObjectStoreError> {
-        let connection = self.connection.lock().unwrap();
-        connection
-            .execute("delete from object where owner_session = ?1", params![owner as i64])
-            .map_err(ObjectStoreError::Database)?;
-        Ok(())
-    }
-
-    /// Deletes every session object, regardless of owner. Called on
-    /// initialization and finalization: session ids do not survive a process,
-    /// so any persisted session object is a leftover to purge.
-    pub fn purge_session_objects(&self) -> Result<(), ObjectStoreError> {
-        let connection = self.connection.lock().unwrap();
-        connection
-            .execute("delete from object where owner_session is not null", [])
-            .map_err(ObjectStoreError::Database)?;
-        Ok(())
-    }
-
     /// Returns the ids of all objects whose stored attributes are a superset
     /// of `template`: every requested attribute must be present with an equal
     /// value. An empty template matches every object. When `include_private`
@@ -405,10 +362,7 @@ impl ObjectStore {
                 continue;
             }
 
-            let matches = template
-                .iter()
-                .all(|wanted| record.attributes.iter().any(|have| have == wanted));
-            if matches {
+            if matches_template(template, &record.attributes) {
                 ids.push(ObjectId(id as u64));
             }
         }
@@ -487,6 +441,7 @@ mod tests {
     use crate::object_store::ObjectStore;
     use crate::object_store::ObjectStoreError;
     use crate::object_store::OBJECT_RECORD_FORMAT_V1;
+    use crate::object_store::SESSION_OBJECT_HANDLE_BIT;
 
     #[test]
     fn store_read_delete_roundtrip() {
@@ -499,7 +454,6 @@ mod tests {
             .write(
                 vec![Attribute::Private(true), Attribute::Label(String::from("test1"))],
                 &bytes,
-                None,
             )
             .unwrap();
 
@@ -581,7 +535,7 @@ mod tests {
     fn records_encode_attribute_variants_by_name() {
         let store = ObjectStore::in_memory().unwrap();
         let id = store
-            .write(vec![Attribute::Label(String::from("named"))], &[0u8; 4][..], None)
+            .write(vec![Attribute::Label(String::from("named"))], &[0u8; 4][..])
             .unwrap();
 
         // The blob must carry the variant *name*, not a positional
@@ -601,14 +555,12 @@ mod tests {
             .write(
                 vec![Attribute::Label(String::from("a")), Attribute::Id(b"shared".to_vec())],
                 &bytes,
-                None,
             )
             .unwrap();
         let b = store
             .write(
                 vec![Attribute::Label(String::from("b")), Attribute::Id(b"shared".to_vec())],
                 &bytes,
-                None,
             )
             .unwrap();
 
@@ -638,13 +590,12 @@ mod tests {
         let bytes = vec![0u8; 8];
 
         let public = store
-            .write(vec![Attribute::Label(String::from("pub"))], &bytes, None)
+            .write(vec![Attribute::Label(String::from("pub"))], &bytes)
             .unwrap();
         let private = store
             .write(
                 vec![Attribute::Label(String::from("priv")), Attribute::Private(true)],
                 &bytes,
-                None,
             )
             .unwrap();
 
@@ -675,11 +626,10 @@ mod tests {
             .write(
                 vec![Attribute::Label(String::from("has-unknown")), Attribute::Unknown],
                 &bytes,
-                None,
             )
             .unwrap();
         store
-            .write(vec![Attribute::Label(String::from("clean"))], &bytes, None)
+            .write(vec![Attribute::Label(String::from("clean"))], &bytes)
             .unwrap();
 
         // A template with `Unknown` matches nothing, even when an object
@@ -707,29 +657,16 @@ mod tests {
     }
 
     #[test]
-    fn purge_and_delete_target_only_session_objects() {
+    fn store_rowids_never_collide_with_session_object_handles() {
         let store = ObjectStore::in_memory().unwrap();
         let bytes = vec![0u8; 8];
 
-        let token = store
-            .write(vec![Attribute::Label(String::from("tok"))], &bytes, None)
+        // The handle-space partition: store rowids are positive i64, so a
+        // store handle can never carry the session-object bit.
+        let id = store
+            .write(vec![Attribute::Label(String::from("tok"))], &bytes)
             .unwrap();
-        let owned = store
-            .write(vec![Attribute::Label(String::from("s7"))], &bytes, Some(7))
-            .unwrap();
-        let other = store
-            .write(vec![Attribute::Label(String::from("s9"))], &bytes, Some(9))
-            .unwrap();
-
-        // Closing session 7 removes only its object.
-        store.delete_session_objects(7).unwrap();
-        assert!(store.read_raw(&owned).is_err());
-        assert!(store.read_raw(&other).is_ok());
-        assert!(store.read_raw(&token).is_ok());
-
-        // Purging removes all remaining session objects but keeps token ones.
-        store.purge_session_objects().unwrap();
-        assert!(store.read_raw(&other).is_err());
-        assert!(store.read_raw(&token).is_ok());
+        assert!(!id.is_session_object());
+        assert!(ObjectId::new(SESSION_OBJECT_HANDLE_BIT | 1).is_session_object());
     }
 }

@@ -25,7 +25,7 @@ use crate::attribute::Attribute;
 use crate::attribute::AttributeType;
 use crate::attribute::KeyType;
 use crate::attribute::ObjectClass;
-use crate::attribute::StoredAttributes;
+use crate::attribute::CanonicalAttributes;
 use crate::attribute::Template;
 use crate::attribute::TemplateError;
 use crate::mechanism::Mechanism;
@@ -227,16 +227,11 @@ impl Hsm {
             return Err(HsmError::AlreadyInitialized);
         }
         // Load persisted token state so a restarted process sees the same
-        // tokens (and accepts the same PINs), and drop any session objects
-        // left behind by a previous process (their owning sessions are gone).
-        // Roll back on failure so the caller can retry once the store is
-        // reachable.
-        let result = self.hydrate_slots().and_then(|()| {
-            self.object_store()?
-                .purge_session_objects()
-                .map_err(HsmError::ObjectStore)
-        });
-        if let Err(error) = result {
+        // tokens (and accepts the same PINs). Session objects need no crash
+        // recovery: they live in process memory only, so they cannot outlive
+        // a process. Roll back on failure so the caller can retry once the
+        // store is reachable.
+        if let Err(error) = self.hydrate_slots() {
             self.initialized.store(false, Ordering::SeqCst);
             return Err(error);
         }
@@ -272,25 +267,20 @@ impl Hsm {
         Ok(())
     }
 
-    /// Closes all sessions on all slots and resets login state.
+    /// Closes all sessions on all slots (destroying their session objects)
+    /// and resets login state.
     pub fn finalize(&self) -> Result<()> {
         if !self.initialized.swap(false, Ordering::SeqCst) {
             return Err(HsmError::NotInitialized);
         }
 
-        {
-            let slots = self.slots.read().unwrap();
-            for slot_lock in slots.values() {
-                let mut slot = slot_lock.write().unwrap();
-                slot.sessions.write().unwrap().clear();
-                slot.current_user_type = None;
-            }
+        let slots = self.slots.read().unwrap();
+        for slot_lock in slots.values() {
+            let mut slot = slot_lock.write().unwrap();
+            slot.sessions.write().unwrap().clear();
+            slot.session_objects.write().unwrap().clear();
+            slot.current_user_type = None;
         }
-
-        // All sessions are gone, so their session objects must go too.
-        self.object_store()?
-            .purge_session_objects()
-            .map_err(HsmError::ObjectStore)?;
         Ok(())
     }
 
@@ -386,7 +376,7 @@ impl Hsm {
         }
 
         let session_id = SessionId(self.next_session_id.fetch_add(1, Ordering::Relaxed));
-        let session = Session::new(session_id, slot_id, state, store);
+        let session = Session::new(session_id, slot_id, state, store, slot.session_objects.clone());
         slot.sessions
             .write()
             .unwrap()
@@ -395,7 +385,7 @@ impl Hsm {
     }
 
     pub fn close_session(&self, session_id: SessionId) -> Result<()> {
-        let store = self.object_store()?;
+        self.ensure_initialized()?;
         let slot_lock = self
             .find_by_session_id(session_id)
             .ok_or(HsmError::SessionNotFound(session_id))?;
@@ -411,12 +401,11 @@ impl Hsm {
         if no_sessions_left {
             slot.current_user_type = None;
         }
+        let session_objects = slot.session_objects.clone();
         drop(slot);
 
         // Session objects live only as long as the session that created them.
-        store
-            .delete_session_objects(session_id.0)
-            .map_err(HsmError::ObjectStore)?;
+        session_objects.write().unwrap().remove_owned_by(session_id);
         Ok(())
     }
 
@@ -888,10 +877,18 @@ impl Hsm {
         let ctx = self.session_context(session_id)?;
         let mut attributes = ctx.object(&object, HsmError::ObjectHandleInvalid)?.attributes;
         ctx.check_writable(&attributes)?;
+
+        // CKA_TOKEN decides which store holds the object — and thereby its
+        // handle — so it is fixed at creation; changing token-ness requires
+        // C_CopyObject, which mints a new object with a new handle.
+        if updates.iter().any(|update| matches!(update, Attribute::Token(_))) {
+            return Err(HsmError::AttributeReadOnly);
+        }
+
         apply_attribute_updates(&mut attributes, updates, false)?;
         let session = ctx.session();
         session
-            .set_object_attributes(&object, StoredAttributes::from_persisted(attributes))
+            .set_object_attributes(&object, CanonicalAttributes::from_persisted(attributes))
             .map_err(store_error)
     }
 
@@ -910,7 +907,7 @@ impl Hsm {
         ctx.check_writable(&attributes)?;
         let session = ctx.session();
         session
-            .copy_object(&source, StoredAttributes::from_persisted(attributes))
+            .copy_object(&source, CanonicalAttributes::from_persisted(attributes))
             .map_err(store_error)
     }
 

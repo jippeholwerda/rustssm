@@ -175,7 +175,7 @@ pub enum TemplateError {
 /// types.
 ///
 /// Parse-don't-validate: [`Template::merge`] is the only producer of
-/// [`StoredAttributes`], which in turn is the only attribute list a session
+/// [`CanonicalAttributes`], which in turn is the only attribute list a session
 /// will persist — so an object-creating path that skips validation or the
 /// merge does not compile, rather than silently storing an unnormalized list.
 #[derive(Debug)]
@@ -228,7 +228,7 @@ impl Template {
     /// present, so `ObjectStore::search` stays a plain presence-plus-equality
     /// match (a template like `CKA_PRIVATE = false` matches an object whose
     /// template never mentioned it, as it would against SoftHSM).
-    pub fn merge(self, derived: Vec<Attribute>) -> StoredAttributes {
+    pub fn merge(self, derived: Vec<Attribute>) -> CanonicalAttributes {
         let Self(mut attributes) = self;
         attributes.retain(|attr| !matches!(attr, Attribute::Value(_) | Attribute::Unknown | Attribute::Unsupported));
 
@@ -244,18 +244,18 @@ impl Template {
             add_absent(&mut attributes, default_boolean_attributes(class));
         }
 
-        StoredAttributes(attributes)
+        CanonicalAttributes(attributes)
     }
 }
 
-/// The complete attribute list persisted with an object: the creation
-/// template merged with token-synthesized/derived attributes and class
-/// defaults. Produced by [`Template::merge`] (the write path) or
-/// reconstructed from the store, and the only list a session will persist.
+/// An object's attribute list in canonical form — the creation template
+/// merged with token-synthesized/derived attributes and class defaults.
+/// Produced by [`Template::merge`] (the write path) or reconstructed from
+/// the store, and the only list a session will persist.
 #[derive(Debug)]
-pub struct StoredAttributes(Vec<Attribute>);
+pub struct CanonicalAttributes(Vec<Attribute>);
 
-impl StoredAttributes {
+impl CanonicalAttributes {
     /// Reconstructs the list of an already-persisted object — the store
     /// round-trip, or such a list after an attribute update. Not for
     /// application templates; those must go through [`Template::merge`].
@@ -271,6 +271,16 @@ impl StoredAttributes {
     pub fn into_vec(self) -> Vec<Attribute> {
         self.0
     }
+}
+
+/// Whether an object's stored `attributes` satisfy a search `template`: every
+/// template attribute must be present with an equal value (an empty template
+/// matches everything). Callers guard separately against templates carrying
+/// [`Attribute::Unknown`], which must match nothing.
+pub fn matches_template(template: &[Attribute], attributes: &[Attribute]) -> bool {
+    template
+        .iter()
+        .all(|wanted| attributes.iter().any(|have| have == wanted))
 }
 
 /// Appends each of `additions` to `attributes` only if `attributes` does not

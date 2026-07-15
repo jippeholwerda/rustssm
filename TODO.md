@@ -190,14 +190,13 @@ TODOs, roughly in dependency order:
       via `C_FindObjects`, which works.
 - [x] **Session-object lifecycle** — nl-wallet creates session keys with
       `Token(false)` (`generate_session_signing_key_pair`, unwrapped signing
-      keys) and relies on the HSM cleaning them up. Objects carry an
-      `owner_session` column: `NULL` for token objects (persistent),
-      otherwise the creating session's id. Session objects are deleted when
-      that session closes (`C_CloseSession`) and every session object is
-      purged on `C_Initialize`/`C_Finalize` (session ids don't survive a
-      process, so any left behind is a crash orphan). Token objects
-      (`CKA_TOKEN` true) are unaffected. Matches their PVW-5862 assumption
-      that session objects die with the session.
+      keys) and relies on the HSM cleaning them up. Session objects are
+      destroyed when the creating session closes and die with the process,
+      matching their PVW-5862 assumption; token objects (`CKA_TOKEN` true)
+      are unaffected. (Originally implemented as an `owner_session` column in
+      the store with purges on `C_Initialize`/`C_Finalize`; superseded
+      2026-07-15 by the in-memory session-object store — see the
+      multi-process entry in section 4.)
 - [x] **Validate `CKA_EC_PARAMS`** — nl-wallet passes the P-256 OID
       explicitly; rustssm now validates it rather than silently assuming
       P-256. A supplied `CKA_EC_PARAMS` naming a curve other than secp256r1
@@ -463,11 +462,11 @@ Ranked; being worked one at a time.
       directly via the store-level `write` to prove the guard, not just the
       construction invariant, is what blocks the match) and the existing
       `unwrap_drops_untracked_template_attributes` hsm-level test.
-- [x] **Witness-type refactor (Template / StoredAttributes / SessionContext)**
+- [x] **Witness-type refactor (Template / CanonicalAttributes / SessionContext)**
       — parse-don't-validate: `Template::new` validates an application-supplied
       attribute list (rejects `Unsupported` and duplicate attribute types in
       one place), and `Template::merge` is the sole producer of
-      `StoredAttributes`, the only attribute list a session will persist — so
+      `CanonicalAttributes`, the only attribute list a session will persist — so
       an object-creating path that skips validation or the merge does not
       compile, rather than silently storing an unnormalized list. `SessionContext`
       captures a session and a snapshot of its slot's login state under one
@@ -527,20 +526,41 @@ Ranked; being worked one at a time.
       inside one transaction, threaded through `Session` and used by both
       `generate_key_pair` arms. (Noted while deciding to keep SQLite: this is
       exactly the kind of multi-object atomicity the database provides and a
-      flat-file store would have to reinvent.)
-- [ ] **`C_Initialize` purges *all* session objects — a single-process
-      assumption** — `purge_session_objects` deletes every row with
-      `owner_session IS NOT NULL`, which is correct crash recovery when one
-      process owns the store, but in a multi-process deployment (several
-      services loading the `.so` against one store, the SoftHSM devenv model)
-      a second process calling `C_Initialize` destroys the first process's
-      *live* session objects — its session keys vanish mid-use
-      (`CKR_OBJECT_HANDLE_INVALID` on next access). SoftHSM avoids this by
-      keeping session objects in memory only. Until this is addressed, the
-      supported model is effectively one module process per store at a time
-      (fine for nextest's process-per-test isolation and the current single
-      consumer). Candidate fixes, in rough order of preference: keep session
-      objects in memory (matches SoftHSM semantics; session objects never
-      touch SQLite, so crash orphans become impossible by construction), or
-      tag `owner_session` rows with a process identity and purge only your
-      own leftovers (needs care around PID reuse).
+      flat-file store would have to reinvent.) Scope shrank with the
+      in-memory session-object move: only *token* keypairs hit the store, so
+      the crash window exists only for a pair generated with
+      `CKA_TOKEN = true` on both halves; a session keypair (nl-wallet's case)
+      involves no store writes at all.
+- [x] **`C_Initialize` purges *all* session objects — a single-process
+      assumption** — fixed by moving session objects to an in-memory
+      per-slot store (`SessionObjects` in `session.rs`), matching SoftHSM
+      semantics. Session objects never touch SQLite: handles are partitioned
+      from store rowids by bit 63 (compile-time-asserted 64-bit
+      `CK_OBJECT_HANDLE`; store rowids are positive `i64`, so no collision is
+      possible), `Session` routes every read/write/copy/delete by handle bit
+      or `CKA_TOKEN`, and `C_FindObjects` merges the store scan with the
+      in-memory matches under the same template/§4.4/`Unknown` semantics
+      (shared `matches_template` in `attribute.rs`). Consequences: the
+      cross-process purge and the session-id collision are both
+      unrepresentable (each process's session objects live in its own
+      memory); crash orphans are impossible by construction, so
+      `purge_session_objects`/`delete_session_objects`/the `owner_session`
+      column are all deleted; short-lived key material (unwrapped signing
+      keys) never reaches disk; and multi-process store sharing is now safe
+      for session objects — the devenv-swap blocker is gone. `C_CopyObject`
+      remains the one way to change token-ness (a copy is a new object with
+      a new handle, and can cross the memory/store boundary in either
+      direction); `C_SetAttributeValue` rejects `CKA_TOKEN` as
+      `CKR_ATTRIBUTE_READ_ONLY`, since a handle cannot switch stores in
+      place. Covered by
+      `session_objects_live_in_memory_with_partitioned_handles`,
+      `closing_a_session_destroys_only_its_session_objects`,
+      `copy_object_moves_across_the_token_boundary`,
+      `set_object_attributes_rejects_token_changes`, and the pre-existing
+      `session_objects_do_not_survive_a_restart` (which now passes for a
+      stronger reason: the "ephemeral" key never existed on disk). Verified:
+      130 local tests, rust-cryptoki 44/32 (unchanged; `session_copy_object`,
+      `session_find_objects`, `session_objecthandle_iterator`,
+      `update_attributes_key` all still green), nl-wallet 5/5 (including
+      `wrap_key_and_sign`, the full session-object lifecycle through the
+      r2d2 pool).

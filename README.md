@@ -45,9 +45,11 @@ SO/user PINs) are persisted in a SQLite database (`rustssm.db` in the working
 directory; override with `RUSTSSM_DATABASE_URL`, either a plain path or a
 `sqlite://path` URL — namespaced so it can't clash with a host process's own
 `DATABASE_URL`), so a restarted module keeps its tokens and accepts the
-same PINs. Session objects (`CKA_TOKEN` false) are destroyed when the session
-that created them closes, and any left behind by a crash are purged on the
-next `C_Initialize`.
+same PINs. Session objects (`CKA_TOKEN` false) live in process memory only,
+like SoftHSM's: they are visible to all of the process's sessions, destroyed
+when the session that created them closes, and cannot outlive the process —
+short-lived key material never touches disk, and processes sharing one
+database cannot interfere with each other's session objects.
 
 Set `RUSTSSM_LOG=debug` (or `error`/`warn`/`info`/`trace`) to log all calls
 and error returns to stderr, including the resolved database path.

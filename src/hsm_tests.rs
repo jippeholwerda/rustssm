@@ -61,6 +61,22 @@ fn generate_secret_key(hsm: &Hsm, session: SessionId, length: u64, label: &str) 
     .unwrap()
 }
 
+/// Like [`generate_secret_key`] but as a token object, for tests that read
+/// the key material back through the persistent store.
+fn generate_token_secret_key(hsm: &Hsm, session: SessionId, length: u64, label: &str) -> ObjectId {
+    hsm.generate_key(
+        session,
+        &Mechanism::GenericSecretKeyGen,
+        vec![
+            Attribute::ValueLen(length),
+            Attribute::Label(String::from(label)),
+            Attribute::Private(true),
+            Attribute::Token(true),
+        ],
+    )
+    .unwrap()
+}
+
 // ---- concurrency -------------------------------------------------------
 
 /// Hammers a single shared `Hsm` from many threads, each running full crypto
@@ -540,7 +556,11 @@ fn generate_aes_key_produces_usable_key() {
             .generate_key(
                 session,
                 &Mechanism::AesKeyGen,
-                vec![Attribute::ValueLen(length), Attribute::Label(String::from("aes"))],
+                vec![
+                    Attribute::ValueLen(length),
+                    Attribute::Label(String::from("aes")),
+                    Attribute::Token(true),
+                ],
             )
             .unwrap();
 
@@ -874,7 +894,7 @@ fn sign_init_with_invalid_key_handle_is_rejected() {
 fn aes_gcm_encryption_matches_reference_implementation() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
-    let key = generate_secret_key(&hsm, session, 32, "aes key");
+    let key = generate_token_secret_key(&hsm, session, 32, "aes key");
 
     let (_, material) = hsm.object_store().unwrap().read_parts(&key).unwrap();
     let key_bytes: Vec<u8> = material.deserialized().unwrap();
@@ -956,7 +976,7 @@ fn aes_gcm_with_32_byte_iv_roundtrips_and_matches_reference() {
     // fast path.
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
-    let key = generate_secret_key(&hsm, session, 32, "aes key");
+    let key = generate_token_secret_key(&hsm, session, 32, "aes key");
     let (_, material) = hsm.object_store().unwrap().read_parts(&key).unwrap();
     let key_bytes: Vec<u8> = material.deserialized().unwrap();
 
@@ -2061,6 +2081,7 @@ fn copy_object_duplicates_material_and_applies_overrides() {
                 Attribute::KeyType(KeyType::Aes),
                 Attribute::Sensitive(true),
                 Attribute::Extractable(false),
+                Attribute::Token(true),
                 Attribute::ValueLen(16),
                 Attribute::Label(String::from("original")),
             ],
@@ -2296,6 +2317,110 @@ fn token_objects_outlive_their_creating_session() {
 
     let other = user_session(&hsm);
     assert!(hsm.object_exists(other, key).unwrap());
+}
+
+#[test]
+fn session_objects_live_in_memory_with_partitioned_handles() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    let session_key = generate_secret_key(&hsm, session, 32, "ephemeral");
+    let token_key = generate_token_secret_key(&hsm, session, 32, "persistent");
+
+    // The handle spaces are partitioned by the top bit.
+    assert!(session_key.is_session_object());
+    assert!(!token_key.is_session_object());
+
+    // The session object never reaches the persistent store...
+    assert!(hsm.object_store().unwrap().read_parts(&session_key).is_err());
+    // ...but is fully usable through the API: attributes read back and it
+    // drives crypto.
+    assert_eq!(
+        hsm.object_attribute(session, session_key.clone(), AttributeType::Label)
+            .unwrap(),
+        Some(Attribute::Label(String::from("ephemeral")))
+    );
+    hsm.sign_init(session, &Mechanism::Sha256Hmac, session_key.clone())
+        .unwrap();
+    assert!(!hsm.sign(session, b"data").unwrap().is_empty());
+
+    // A search sees both stores merged.
+    hsm.find_objects_init(session, vec![Attribute::Private(true)]).unwrap();
+    let found = hsm.find_objects_next(session, 10).unwrap();
+    hsm.find_objects_final(session).unwrap();
+    assert!(found.contains(&session_key));
+    assert!(found.contains(&token_key));
+
+    // Session objects are visible to (and usable by) the process's other
+    // sessions, per the spec.
+    let sibling = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+    assert!(hsm.object_exists(sibling, session_key.clone()).unwrap());
+    hsm.sign_init(sibling, &Mechanism::Sha256Hmac, session_key).unwrap();
+    assert!(!hsm.sign(sibling, b"data").unwrap().is_empty());
+}
+
+#[test]
+fn closing_a_session_destroys_only_its_session_objects() {
+    let hsm = hsm_with_token();
+    let session_a = user_session(&hsm);
+    let session_b = hsm.open_session(SLOT, SessionState::ReadWrite).unwrap();
+
+    let key_a = generate_secret_key(&hsm, session_a, 32, "a");
+    let key_b = generate_secret_key(&hsm, session_b, 32, "b");
+    let token_key = generate_token_secret_key(&hsm, session_a, 32, "tok");
+
+    hsm.close_session(session_a).unwrap();
+
+    // Session A's object is gone; session B's and the token object remain.
+    assert!(!hsm.object_exists(session_b, key_a).unwrap());
+    assert!(hsm.object_exists(session_b, key_b).unwrap());
+    assert!(hsm.object_exists(session_b, token_key).unwrap());
+}
+
+#[test]
+fn copy_object_moves_across_the_token_boundary() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // Session object → token object: the copy is persisted.
+    let session_key = generate_secret_key(&hsm, session, 32, "ephemeral");
+    let promoted = hsm
+        .copy_object(session, session_key.clone(), vec![Attribute::Token(true)])
+        .unwrap();
+    assert!(!promoted.is_session_object());
+    assert!(hsm.object_store().unwrap().read_parts(&promoted).is_ok());
+
+    // Token object → session object: the copy is in-memory only.
+    let demoted = hsm
+        .copy_object(session, promoted.clone(), vec![Attribute::Token(false)])
+        .unwrap();
+    assert!(demoted.is_session_object());
+    assert!(hsm.object_store().unwrap().read_parts(&demoted).is_err());
+
+    // All three share the key material: the demoted copy signs identically
+    // to the original session key.
+    hsm.sign_init(session, &Mechanism::Sha256Hmac, session_key).unwrap();
+    let original = hsm.sign(session, b"data").unwrap();
+    hsm.sign_init(session, &Mechanism::Sha256Hmac, demoted).unwrap();
+    assert_eq!(hsm.sign(session, b"data").unwrap(), original);
+}
+
+#[test]
+fn set_object_attributes_rejects_token_changes() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = generate_token_secret_key(&hsm, session, 32, "fixed");
+
+    // CKA_TOKEN selects the object's store (and thereby its handle), so it
+    // is fixed at creation; C_CopyObject is the way to change token-ness.
+    assert!(matches!(
+        hsm.set_object_attributes(session, key.clone(), vec![Attribute::Token(false)]),
+        Err(HsmError::AttributeReadOnly)
+    ));
+    assert!(matches!(
+        hsm.set_object_attributes(session, key, vec![Attribute::Token(true)]),
+        Err(HsmError::AttributeReadOnly)
+    ));
 }
 
 #[test]
