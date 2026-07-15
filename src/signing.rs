@@ -1,13 +1,3 @@
-use aes_gcm::aead::Aead;
-use aes_gcm::aead::Payload;
-use aes_gcm::aes::cipher::consts::U32;
-use aes_gcm::aes::Aes128;
-use aes_gcm::aes::Aes256;
-use aes_gcm::Aes128Gcm;
-use aes_gcm::Aes256Gcm;
-use aes_gcm::AesGcm;
-use aes_gcm::KeyInit;
-use aes_gcm::Nonce;
 use hmac::Hmac;
 use hmac::Mac;
 use p256::ecdsa;
@@ -19,38 +9,6 @@ use signature::hazmat::PrehashVerifier;
 use crate::operation::Operation;
 
 pub type HmacSha256 = Hmac<Sha256>;
-
-/// Length in bytes of an AES-GCM authentication tag.
-pub const AES_GCM_TAG_LENGTH: usize = 16;
-
-/// AES-GCM with a 32-byte initialization vector. AES-GCM's nonce length is a
-/// compile-time type parameter, so each supported IV length needs its own
-/// concrete cipher type; the default `Aes*Gcm` aliases fix it at 12 bytes.
-type Aes128Gcm32 = AesGcm<Aes128, U32>;
-type Aes256Gcm32 = AesGcm<Aes256, U32>;
-
-/// Encrypts under a concrete AES-GCM cipher. The nonce length must match the
-/// cipher's `NonceSize` (callers dispatch on it), so a mismatch here is a
-/// caller bug rather than an input error.
-fn gcm_encrypt<C>(key: &[u8], nonce: &[u8], payload: Payload) -> Option<Vec<u8>>
-where
-    C: KeyInit + Aead,
-{
-    let cipher = C::new_from_slice(key).ok()?;
-    let nonce = Nonce::<C::NonceSize>::try_from(nonce).ok()?;
-    cipher.encrypt(&nonce, payload).ok()
-}
-
-/// Decrypts under a concrete AES-GCM cipher. A `None` result is an
-/// authentication-tag mismatch (or a ciphertext shorter than the tag).
-fn gcm_decrypt<C>(key: &[u8], nonce: &[u8], payload: Payload) -> Option<Vec<u8>>
-where
-    C: KeyInit + Aead,
-{
-    let cipher = C::new_from_slice(key).ok()?;
-    let nonce = Nonce::<C::NonceSize>::try_from(nonce).ok()?;
-    cipher.decrypt(&nonce, payload).ok()
-}
 
 pub struct Signature(pub Vec<u8>);
 
@@ -66,14 +24,6 @@ pub trait SignatureLength {
 
 pub trait Verify {
     fn verify(self, data: &[u8], signature: &[u8]) -> bool;
-}
-
-pub trait Encrypt {
-    fn encrypt(self, data: &[u8]) -> Option<Vec<u8>>;
-}
-
-pub trait Decrypt {
-    fn decrypt(self, data: &[u8]) -> Option<Vec<u8>>;
 }
 
 impl Sign for Operation {
@@ -130,60 +80,6 @@ impl Verify for Operation {
                 verifying_key.verify_slice(signature).is_ok()
             }
             _ => unimplemented!("operation not supported for verification"),
-        }
-    }
-}
-
-impl Encrypt for Operation {
-    fn encrypt(self, data: &[u8]) -> Option<Vec<u8>> {
-        match self {
-            Operation::EncryptAesGcm {
-                key,
-                initialization_vector,
-                additional_authenticated_data,
-            } => {
-                let payload = Payload {
-                    msg: data,
-                    aad: &additional_authenticated_data,
-                };
-                let iv = &initialization_vector;
-
-                match (key.len(), iv.len()) {
-                    (16, 12) => gcm_encrypt::<Aes128Gcm>(&key, iv, payload),
-                    (32, 12) => gcm_encrypt::<Aes256Gcm>(&key, iv, payload),
-                    (16, 32) => gcm_encrypt::<Aes128Gcm32>(&key, iv, payload),
-                    (32, 32) => gcm_encrypt::<Aes256Gcm32>(&key, iv, payload),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-}
-
-impl Decrypt for Operation {
-    fn decrypt(self, data: &[u8]) -> Option<Vec<u8>> {
-        match self {
-            Operation::DecryptAesGcm {
-                key,
-                initialization_vector,
-                additional_authenticated_data,
-            } => {
-                let payload = Payload {
-                    msg: data,
-                    aad: &additional_authenticated_data,
-                };
-                let iv = &initialization_vector;
-
-                match (key.len(), iv.len()) {
-                    (16, 12) => gcm_decrypt::<Aes128Gcm>(&key, iv, payload),
-                    (32, 12) => gcm_decrypt::<Aes256Gcm>(&key, iv, payload),
-                    (16, 32) => gcm_decrypt::<Aes128Gcm32>(&key, iv, payload),
-                    (32, 32) => gcm_decrypt::<Aes256Gcm32>(&key, iv, payload),
-                    _ => None,
-                }
-            }
-            _ => None,
         }
     }
 }

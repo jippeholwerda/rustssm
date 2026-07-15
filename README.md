@@ -26,7 +26,9 @@ Implemented (and exercised by the rust-cryptoki test suite):
 - Key generation: `CKM_GENERIC_SECRET_KEY_GEN`, `CKM_AES_KEY_GEN`,
   `CKM_RSA_PKCS_KEY_PAIR_GEN`, `CKM_EC_KEY_PAIR_GEN` (P-256)
 - Sign/verify: `CKM_RSA_PKCS`, `CKM_ECDSA`, `CKM_SHA256_HMAC` (single-part)
-- Encrypt/decrypt: `CKM_AES_GCM` (single-part; 96- or 256-bit IV; 128-bit tag)
+- Encrypt/decrypt: `CKM_AES_GCM` (single-part; 96- or 256-bit IV; 128-bit
+  tag), `CKM_AES_ECB`, `CKM_AES_CBC`, `CKM_AES_CBC_PAD` (single-part; all AES
+  key sizes; the unpadded modes require block-aligned input)
 - Key wrapping: `CKM_AES_KEY_WRAP_PAD`
 - Object creation/search: `C_CreateObject` (secret keys via `CKA_VALUE`, RSA
   public keys via raw `CKA_MODULUS`/`CKA_PUBLIC_EXPONENT`, P-256 EC private
@@ -67,7 +69,7 @@ internal invariants and deliberately abort the host process (crash-only) —
 see the module docs in `src/lib.rs`.
 
 Not implemented: `C_CreateObject` for RSA private keys, `CKA_VALUE` readback of
-secret keys (treated as sensitive), digests, multipart operations, RSA/AES-CBC
+secret keys (treated as sensitive), digests, multipart operations, RSA
 encryption, EdDSA, and mechanisms not listed above. Unsupported calls return
 `CKR_FUNCTION_NOT_SUPPORTED` / `CKR_MECHANISM_INVALID`. See [TODO.md](TODO.md)
 for the roadmap.

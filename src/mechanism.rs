@@ -15,4 +15,11 @@ pub enum Mechanism {
         initialization_vector: Vec<u8>,
         additional_authenticated_data: Vec<u8>,
     },
+    AesEcb,
+    AesCbc {
+        initialization_vector: Vec<u8>,
+    },
+    AesCbcPad {
+        initialization_vector: Vec<u8>,
+    },
 }

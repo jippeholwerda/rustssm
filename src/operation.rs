@@ -34,6 +34,23 @@ pub enum Operation {
         initialization_vector: Vec<u8>,
         additional_authenticated_data: Vec<u8>,
     },
+    EncryptAesEcb {
+        key: Vec<u8>,
+    },
+    DecryptAesEcb {
+        key: Vec<u8>,
+    },
+    EncryptAesCbc {
+        key: Vec<u8>,
+        initialization_vector: Vec<u8>,
+        /// PKCS#7 padding (`CKM_AES_CBC_PAD`) vs none (`CKM_AES_CBC`).
+        pad: bool,
+    },
+    DecryptAesCbc {
+        key: Vec<u8>,
+        initialization_vector: Vec<u8>,
+        pad: bool,
+    },
 }
 
 impl Operation {
@@ -52,10 +69,16 @@ impl Operation {
     }
 
     pub fn is_encrypt(&self) -> bool {
-        matches!(self, Operation::EncryptAesGcm { .. })
+        matches!(
+            self,
+            Operation::EncryptAesGcm { .. } | Operation::EncryptAesEcb { .. } | Operation::EncryptAesCbc { .. }
+        )
     }
 
     pub fn is_decrypt(&self) -> bool {
-        matches!(self, Operation::DecryptAesGcm { .. })
+        matches!(
+            self,
+            Operation::DecryptAesGcm { .. } | Operation::DecryptAesEcb { .. } | Operation::DecryptAesCbc { .. }
+        )
     }
 }

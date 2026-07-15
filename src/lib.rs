@@ -46,6 +46,7 @@ use crate::util::random_bytes;
 
 pub mod admin;
 mod attribute;
+mod encryption;
 mod hsm;
 mod logging;
 mod mechanism;
@@ -1569,6 +1570,25 @@ unsafe fn read_mechanism(pMechanism: raw::CK_MECHANISM_PTR) -> CkResult<Mechanis
             Ok(Mechanism::AesGcm {
                 initialization_vector,
                 additional_authenticated_data,
+            })
+        }
+        raw::CKM_AES_ECB => {
+            // Takes no parameter.
+            if mechanism.ulParameterLen != 0 {
+                return Err(raw::CKR_MECHANISM_PARAM_INVALID);
+            }
+            Ok(Mechanism::AesEcb)
+        }
+        raw::CKM_AES_CBC | raw::CKM_AES_CBC_PAD => {
+            // The parameter is the 16-byte IV itself (no struct).
+            if mechanism.pParameter.is_null() || mechanism.ulParameterLen != 16 {
+                return Err(raw::CKR_MECHANISM_PARAM_INVALID);
+            }
+            let initialization_vector = slice::from_raw_parts(mechanism.pParameter as *const u8, 16).to_vec();
+            Ok(if mechanism.mechanism == raw::CKM_AES_CBC {
+                Mechanism::AesCbc { initialization_vector }
+            } else {
+                Mechanism::AesCbcPad { initialization_vector }
             })
         }
         _ => Err(raw::CKR_MECHANISM_INVALID),

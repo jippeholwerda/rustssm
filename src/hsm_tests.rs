@@ -10,6 +10,7 @@ use aes_gcm::Nonce;
 use super::*;
 use crate::attribute::Attribute;
 use crate::attribute::AttributeType;
+use crate::encryption::AES_GCM_TAG_LENGTH;
 use crate::mechanism::Mechanism;
 use crate::object_store::ObjectStore;
 use crate::pin::Pin;
@@ -611,6 +612,163 @@ fn generated_aes_key_encrypts_under_gcm() {
     let ciphertext = hsm.encrypt(session, b"secret payload").unwrap();
 
     assert_eq!(ciphertext.len(), b"secret payload".len() + AES_GCM_TAG_LENGTH);
+}
+
+/// Creates an AES key with known material, for known-answer tests.
+fn import_aes_key(hsm: &Hsm, session: SessionId, value: Vec<u8>) -> ObjectId {
+    use crate::attribute::KeyType;
+    use crate::attribute::ObjectClass;
+
+    hsm.create_object(
+        session,
+        vec![
+            Attribute::Class(ObjectClass::SecretKey),
+            Attribute::KeyType(KeyType::Aes),
+            Attribute::Value(value),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn aes_ecb_roundtrips_across_key_sizes() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // Two identical plaintext blocks: ECB (and only ECB) encrypts them to
+    // identical ciphertext blocks.
+    let plaintext = [0x5Au8; 32];
+
+    for key_length in [16u64, 24, 32] {
+        let key = hsm
+            .generate_key(session, &Mechanism::AesKeyGen, vec![Attribute::ValueLen(key_length)])
+            .unwrap();
+
+        hsm.encrypt_init(session, &Mechanism::AesEcb, key.clone()).unwrap();
+        assert_eq!(hsm.encrypted_length(session, 32).unwrap(), 32);
+        let ciphertext = hsm.encrypt(session, &plaintext).unwrap();
+        assert_eq!(ciphertext.len(), 32);
+        assert_eq!(ciphertext[..16], ciphertext[16..]);
+
+        hsm.decrypt_init(session, &Mechanism::AesEcb, key).unwrap();
+        assert_eq!(hsm.decrypt(session, &ciphertext).unwrap(), plaintext);
+    }
+}
+
+#[test]
+fn aes_cbc_matches_known_vectors() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = import_aes_key(&hsm, session, vec![0; 16]);
+
+    // AES-128-CBC, zero key, zero IV, two zero blocks (the vector the
+    // rust-cryptoki suite asserts).
+    let expected_cipher = [
+        0x66, 0xe9, 0x4b, 0xd4, 0xef, 0x8a, 0x2c, 0x3b, 0x88, 0x4c, 0xfa, 0x59, 0xca, 0x34, 0x2b, 0x2e, 0xf7, 0x95,
+        0xbd, 0x4a, 0x52, 0xe2, 0x9e, 0xd7, 0x13, 0xd3, 0x13, 0xfa, 0x20, 0xe9, 0x8d, 0xbc,
+    ];
+    let cbc = Mechanism::AesCbc {
+        initialization_vector: vec![0; 16],
+    };
+    hsm.encrypt_init(session, &cbc, key.clone()).unwrap();
+    assert_eq!(hsm.encrypt(session, &[0; 32]).unwrap(), expected_cipher);
+
+    hsm.decrypt_init(session, &cbc, key.clone()).unwrap();
+    assert_eq!(hsm.decrypt(session, &expected_cipher).unwrap(), [0; 32]);
+
+    // The padded variant appends one full PKCS#7 block to aligned input.
+    let expected_pad_tail = [
+        0x5c, 0x04, 0x76, 0x16, 0x75, 0x6f, 0xdc, 0x1c, 0x32, 0xe0, 0xdf, 0x6e, 0x8c, 0x59, 0xbb, 0x2a,
+    ];
+    let cbc_pad = Mechanism::AesCbcPad {
+        initialization_vector: vec![0; 16],
+    };
+    hsm.encrypt_init(session, &cbc_pad, key.clone()).unwrap();
+    assert_eq!(hsm.encrypted_length(session, 32).unwrap(), 48);
+    let ciphertext = hsm.encrypt(session, &[0; 32]).unwrap();
+    assert_eq!(ciphertext[..32], expected_cipher);
+    assert_eq!(ciphertext[32..], expected_pad_tail);
+
+    hsm.decrypt_init(session, &cbc_pad, key).unwrap();
+    // The length query reports the upper bound; the operation strips the pad.
+    assert_eq!(hsm.decrypted_length(session, 48).unwrap(), 48);
+    assert_eq!(hsm.decrypt(session, &ciphertext).unwrap(), [0; 32]);
+}
+
+#[test]
+fn aes_cbc_pad_roundtrips_unaligned_plaintext() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = hsm
+        .generate_key(session, &Mechanism::AesKeyGen, vec![Attribute::ValueLen(32)])
+        .unwrap();
+
+    let plaintext = [0xC3u8; 20];
+    let cbc_pad = Mechanism::AesCbcPad {
+        initialization_vector: vec![0x11; 16],
+    };
+
+    hsm.encrypt_init(session, &cbc_pad, key.clone()).unwrap();
+    assert_eq!(hsm.encrypted_length(session, 20).unwrap(), 32);
+    let ciphertext = hsm.encrypt(session, &plaintext).unwrap();
+    assert_eq!(ciphertext.len(), 32);
+
+    hsm.decrypt_init(session, &cbc_pad, key).unwrap();
+    assert_eq!(hsm.decrypt(session, &ciphertext).unwrap(), plaintext);
+}
+
+#[test]
+fn unpadded_block_modes_reject_unaligned_input() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = hsm
+        .generate_key(session, &Mechanism::AesKeyGen, vec![Attribute::ValueLen(16)])
+        .unwrap();
+
+    hsm.encrypt_init(session, &Mechanism::AesEcb, key.clone()).unwrap();
+    assert!(matches!(hsm.encrypted_length(session, 20), Err(HsmError::DataLenRange)));
+    assert!(matches!(hsm.encrypt(session, &[0; 20]), Err(HsmError::DataLenRange)));
+
+    let cbc = Mechanism::AesCbc {
+        initialization_vector: vec![0; 16],
+    };
+    hsm.decrypt_init(session, &cbc, key).unwrap();
+    assert!(matches!(
+        hsm.decrypted_length(session, 20),
+        Err(HsmError::EncryptedDataLenRange)
+    ));
+}
+
+#[test]
+fn aes_cbc_pad_rejects_malformed_padding() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let key = import_aes_key(&hsm, session, vec![0; 16]);
+
+    // A block whose plaintext ends in 0x00 is never valid PKCS#7: encrypt one
+    // zero block without padding, then decrypt it with the padded mechanism.
+    hsm.encrypt_init(
+        session,
+        &Mechanism::AesCbc {
+            initialization_vector: vec![0; 16],
+        },
+        key.clone(),
+    )
+    .unwrap();
+    let ciphertext = hsm.encrypt(session, &[0; 16]).unwrap();
+
+    hsm.decrypt_init(
+        session,
+        &Mechanism::AesCbcPad {
+            initialization_vector: vec![0; 16],
+        },
+        key,
+    )
+    .unwrap();
+    assert!(matches!(
+        hsm.decrypt(session, &ciphertext),
+        Err(HsmError::EncryptedDataInvalid)
+    ));
 }
 
 #[test]

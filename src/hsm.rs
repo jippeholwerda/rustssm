@@ -28,6 +28,8 @@ use crate::attribute::KeyType;
 use crate::attribute::ObjectClass;
 use crate::attribute::Template;
 use crate::attribute::TemplateError;
+use crate::encryption::Decrypt;
+use crate::encryption::Encrypt;
 use crate::mechanism::Mechanism;
 use crate::object_store::ObjectId;
 use crate::object_store::ObjectStore;
@@ -41,13 +43,10 @@ use crate::session::Session;
 use crate::session::SessionError;
 use crate::session::SessionId;
 use crate::session::SessionState;
-use crate::signing::Decrypt;
-use crate::signing::Encrypt;
 use crate::signing::HmacSha256;
 use crate::signing::Sign;
 use crate::signing::SignatureLength;
 use crate::signing::Verify;
-use crate::signing::AES_GCM_TAG_LENGTH;
 use crate::slot::Slot;
 use crate::slot::SlotId;
 use crate::slot::UserType;
@@ -1101,7 +1100,7 @@ impl Hsm {
         let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
         check_key_usage(&key_parts.attributes, Attribute::Encrypt(false))?;
 
-        match mechanism {
+        let operation = match mechanism {
             Mechanism::AesGcm {
                 initialization_vector,
                 additional_authenticated_data,
@@ -1111,18 +1110,27 @@ impl Hsm {
                     return Err(HsmError::KeySizeRange);
                 }
 
-                let session = ctx.session();
-                session
-                    .operation
-                    .set(Operation::EncryptAesGcm {
-                        key: key_bytes,
-                        initialization_vector: initialization_vector.clone(),
-                        additional_authenticated_data: additional_authenticated_data.clone(),
-                    })
-                    .map_err(|_| HsmError::OperationActive)
+                Operation::EncryptAesGcm {
+                    key: key_bytes,
+                    initialization_vector: initialization_vector.clone(),
+                    additional_authenticated_data: additional_authenticated_data.clone(),
+                }
             }
-            _ => Err(HsmError::MechanismInvalid),
-        }
+            Mechanism::AesEcb => Operation::EncryptAesEcb {
+                key: aes_key_bytes(&key_parts)?,
+            },
+            Mechanism::AesCbc { initialization_vector } | Mechanism::AesCbcPad { initialization_vector } => {
+                Operation::EncryptAesCbc {
+                    key: aes_key_bytes(&key_parts)?,
+                    initialization_vector: initialization_vector.clone(),
+                    pad: matches!(mechanism, Mechanism::AesCbcPad { .. }),
+                }
+            }
+            _ => return Err(HsmError::MechanismInvalid),
+        };
+
+        let session = ctx.session();
+        session.operation.set(operation).map_err(|_| HsmError::OperationActive)
     }
 
     /// Length of the ciphertext the active encrypt operation will produce for
@@ -1131,13 +1139,12 @@ impl Hsm {
         let ctx = self.session_context(session_id)?;
         let session = ctx.session();
 
-        if !session.operation.get().is_some_and(Operation::is_encrypt) {
+        let operation = session.operation.get().ok_or(HsmError::OperationNotInitialized)?;
+        if !operation.is_encrypt() {
             return Err(HsmError::OperationNotInitialized);
         }
 
-        data_length
-            .checked_add(AES_GCM_TAG_LENGTH as u64)
-            .ok_or(HsmError::DataLenRange)
+        operation.encrypted_length(data_length).ok_or(HsmError::DataLenRange)
     }
 
     /// Encrypts `data`, consuming the active encrypt operation.
@@ -1150,7 +1157,10 @@ impl Hsm {
         }
 
         let operation = session.operation.take().unwrap();
-        operation.encrypt(data).ok_or(HsmError::GeneralError)
+        // The only expected failure is input unusable for the mechanism
+        // (unaligned data for an unpadded block mode); anything else would be
+        // a corrupt stored key.
+        operation.encrypt(data).ok_or(HsmError::DataLenRange)
     }
 
     pub fn decrypt_init(&self, session_id: SessionId, mechanism: &Mechanism, key: ObjectId) -> Result<()> {
@@ -1163,7 +1173,7 @@ impl Hsm {
         let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
         check_key_usage(&key_parts.attributes, Attribute::Decrypt(false))?;
 
-        match mechanism {
+        let operation = match mechanism {
             Mechanism::AesGcm {
                 initialization_vector,
                 additional_authenticated_data,
@@ -1173,34 +1183,43 @@ impl Hsm {
                     return Err(HsmError::KeySizeRange);
                 }
 
-                let session = ctx.session();
-                session
-                    .operation
-                    .set(Operation::DecryptAesGcm {
-                        key: key_bytes,
-                        initialization_vector: initialization_vector.clone(),
-                        additional_authenticated_data: additional_authenticated_data.clone(),
-                    })
-                    .map_err(|_| HsmError::OperationActive)
+                Operation::DecryptAesGcm {
+                    key: key_bytes,
+                    initialization_vector: initialization_vector.clone(),
+                    additional_authenticated_data: additional_authenticated_data.clone(),
+                }
             }
-            _ => Err(HsmError::MechanismInvalid),
-        }
+            Mechanism::AesEcb => Operation::DecryptAesEcb {
+                key: aes_key_bytes(&key_parts)?,
+            },
+            Mechanism::AesCbc { initialization_vector } | Mechanism::AesCbcPad { initialization_vector } => {
+                Operation::DecryptAesCbc {
+                    key: aes_key_bytes(&key_parts)?,
+                    initialization_vector: initialization_vector.clone(),
+                    pad: matches!(mechanism, Mechanism::AesCbcPad { .. }),
+                }
+            }
+            _ => return Err(HsmError::MechanismInvalid),
+        };
+
+        let session = ctx.session();
+        session.operation.set(operation).map_err(|_| HsmError::OperationActive)
     }
 
     /// Upper bound on the plaintext length the active decrypt operation will
     /// produce for `data_length` bytes of ciphertext. Does not consume the
-    /// operation. AES-GCM ciphertext carries a trailing tag, so anything
-    /// shorter than the tag cannot be valid.
+    /// operation.
     pub fn decrypted_length(&self, session_id: SessionId, data_length: u64) -> Result<u64> {
         let ctx = self.session_context(session_id)?;
         let session = ctx.session();
 
-        if !session.operation.get().is_some_and(Operation::is_decrypt) {
+        let operation = session.operation.get().ok_or(HsmError::OperationNotInitialized)?;
+        if !operation.is_decrypt() {
             return Err(HsmError::OperationNotInitialized);
         }
 
-        data_length
-            .checked_sub(AES_GCM_TAG_LENGTH as u64)
+        operation
+            .decrypted_length(data_length)
             .ok_or(HsmError::EncryptedDataLenRange)
     }
 
@@ -1297,6 +1316,16 @@ fn store_read_error(error: SessionError, invalid: HsmError) -> HsmError {
         }
         _ => invalid,
     }
+}
+
+/// Reads an AES key's raw bytes for a block-mode operation; any AES length
+/// (128/192/256-bit) is usable.
+fn aes_key_bytes(key_parts: &ObjectParts) -> Result<Vec<u8>> {
+    let key_bytes: Vec<u8> = key_parts.material().ok_or(HsmError::KeyHandleInvalid)?;
+    if !matches!(key_bytes.len(), 16 | 24 | 32) {
+        return Err(HsmError::KeySizeRange);
+    }
+    Ok(key_bytes)
 }
 
 /// Usage-flag enforcement (`CKA_SIGN`, `CKA_ENCRYPT`, …): refuses the

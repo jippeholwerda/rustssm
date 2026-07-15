@@ -85,8 +85,18 @@ attribute rejection unlocked `unique_id`; `C_CopyObject` unlocked
       longer `CKR_FUNCTION_NOT_SUPPORTED` stubs); AES-GCM decrypt is
       implemented. Other mechanisms (RSA, AES-CBC/ECB below) still need their
       decrypt arms.
-- [ ] `CKM_AES_ECB`, `CKM_AES_CBC`, `CKM_AES_CBC_PAD`
-      → `aes_cbc_encrypt`, `aes_cbc_pad_encrypt`, `wrap_and_unwrap_key`
+- [x] `CKM_AES_ECB`, `CKM_AES_CBC`, `CKM_AES_CBC_PAD` — single-part
+      encrypt/decrypt, all AES key sizes (128/192/256), via the `ecb`/`cbc`
+      RustCrypto crates in the new `encryption` module (which also absorbed
+      the AES-GCM code and the `Encrypt`/`Decrypt` traits from `signing.rs`,
+      plus per-mechanism `encrypted_length`/`decrypted_length`). Unpadded
+      modes reject unaligned input (`CKR_DATA_LEN_RANGE` /
+      `CKR_ENCRYPTED_DATA_LEN_RANGE`); malformed PKCS#7 padding on CBC-PAD
+      decrypt → `CKR_ENCRYPTED_DATA_INVALID`. Known-answer vectors pinned in
+      hsm_tests. Baseline 45 → 48 (`aes_cbc_encrypt`, `aes_cbc_pad_encrypt`,
+      `encrypt_decrypt_single_part`); `wrap_and_unwrap_key` still needs RSA
+      PKCS wrap, `ekdf_aes_cbc_encrypt_data` still needs `C_DeriveKey`,
+      multipart is its own item below.
 - [ ] `CKM_RSA_PKCS` encrypt/decrypt and `CKM_RSA_PKCS_OAEP`
       → `encrypt_decrypt`, `encrypt_decrypt_single_part`,
       `rsa_pkcs_oaep_empty`, `rsa_pkcs_oaep_with_data`,
