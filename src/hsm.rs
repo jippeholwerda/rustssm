@@ -23,9 +23,9 @@ use thiserror::Error;
 use crate::attribute::default_boolean_attributes;
 use crate::attribute::Attribute;
 use crate::attribute::AttributeType;
+use crate::attribute::CanonicalAttributes;
 use crate::attribute::KeyType;
 use crate::attribute::ObjectClass;
-use crate::attribute::CanonicalAttributes;
 use crate::attribute::Template;
 use crate::attribute::TemplateError;
 use crate::mechanism::Mechanism;
@@ -714,11 +714,11 @@ impl Hsm {
                 ]);
 
                 let session = ctx.session();
-                let private_id = session
-                    .write_object(&private_key, private_key_attributes)
-                    .map_err(store_error)?;
-                let public_id = session
-                    .write_object(&public_key, public_key_attributes)
+                let (private_id, public_id) = session
+                    .write_object_pair(
+                        (&private_key, private_key_attributes),
+                        (&public_key, public_key_attributes),
+                    )
                     .map_err(store_error)?;
 
                 Ok((public_id, private_id))
@@ -743,11 +743,11 @@ impl Hsm {
                 ]);
 
                 let session = ctx.session();
-                let private_id = session
-                    .write_object(&private_bytes, private_key_attributes)
-                    .map_err(store_error)?;
-                let public_id = session
-                    .write_object(&verifying_key, public_key_attributes)
+                let (private_id, public_id) = session
+                    .write_object_pair(
+                        (&private_bytes, private_key_attributes),
+                        (&verifying_key, public_key_attributes),
+                    )
                     .map_err(store_error)?;
 
                 Ok((public_id, private_id))

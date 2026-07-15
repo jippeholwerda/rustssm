@@ -139,6 +139,32 @@ where
     Ok(content)
 }
 
+/// Encodes attributes plus material as an object blob ready to insert.
+fn encode_record<T>(attributes: &[Attribute], material: &T) -> Result<Vec<u8>, ObjectStoreError>
+where
+    T: Serialize + ?Sized,
+{
+    encode_content(&NewObjectRecord { attributes, material })
+}
+
+/// Inserts an encoded object blob; `connection` may be a plain connection or
+/// an open transaction.
+fn insert_object(
+    connection: &Connection,
+    attributes: &[Attribute],
+    content: &[u8],
+) -> Result<ObjectId, ObjectStoreError> {
+    let (private, label) = indexed_columns(attributes);
+    connection
+        .execute(
+            "insert into object (content, private, label) values (?1, ?2, ?3)",
+            params![content, private, label],
+        )
+        .map_err(ObjectStoreError::Database)?;
+
+    Ok(ObjectId(connection.last_insert_rowid() as u64))
+}
+
 /// Decodes a version-prefixed object blob.
 fn decode_content(content: &[u8]) -> Result<ObjectRecord, ObjectStoreError> {
     match content.split_first() {
@@ -230,22 +256,36 @@ impl ObjectStore {
     where
         T: Serialize + ?Sized,
     {
-        let (private, label) = indexed_columns(&attributes);
-        let record = NewObjectRecord {
-            attributes: &attributes,
-            material,
-        };
-        let content = encode_content(&record)?;
+        let content = encode_record(&attributes, material)?;
 
         let connection = self.connection.lock().unwrap();
-        connection
-            .execute(
-                "insert into object (content, private, label) values (?1, ?2, ?3)",
-                params![content, private, label],
-            )
-            .map_err(ObjectStoreError::Database)?;
+        insert_object(&connection, &attributes, &content)
+    }
 
-        Ok(ObjectId(connection.last_insert_rowid() as u64))
+    /// Persists two objects inside a single transaction — used for token key
+    /// pairs, so a crash between the halves (the process aborts on panic)
+    /// cannot leave an orphaned single key in the store.
+    pub fn write_pair<A, B>(
+        &self,
+        first: (Vec<Attribute>, &A),
+        second: (Vec<Attribute>, &B),
+    ) -> Result<(ObjectId, ObjectId), ObjectStoreError>
+    where
+        A: Serialize + ?Sized,
+        B: Serialize + ?Sized,
+    {
+        let (first_attributes, first_material) = first;
+        let (second_attributes, second_material) = second;
+        let first_content = encode_record(&first_attributes, first_material)?;
+        let second_content = encode_record(&second_attributes, second_material)?;
+
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction().map_err(ObjectStoreError::Database)?;
+        let first_id = insert_object(&transaction, &first_attributes, &first_content)?;
+        let second_id = insert_object(&transaction, &second_attributes, &second_content)?;
+        transaction.commit().map_err(ObjectStoreError::Database)?;
+
+        Ok((first_id, second_id))
     }
 
     /// Returns an object's stored attribute list together with its key
@@ -465,6 +505,28 @@ mod tests {
 
         store.delete(&id).unwrap();
         assert!(store.read_raw(&id).is_err());
+    }
+
+    #[test]
+    fn write_pair_persists_both_halves() {
+        let store = ObjectStore::in_memory().unwrap();
+
+        let (first, second) = store
+            .write_pair(
+                (vec![Attribute::Label(String::from("private"))], &vec![1u8, 2, 3]),
+                (vec![Attribute::Label(String::from("public"))], &vec![4u8, 5, 6]),
+            )
+            .unwrap();
+
+        assert_ne!(first, second);
+
+        let (attributes, material) = store.read_parts(&first).unwrap();
+        assert_eq!(attributes, vec![Attribute::Label(String::from("private"))]);
+        assert_eq!(material.deserialized::<Vec<u8>>().unwrap(), vec![1, 2, 3]);
+
+        let (attributes, material) = store.read_parts(&second).unwrap();
+        assert_eq!(attributes, vec![Attribute::Label(String::from("public"))]);
+        assert_eq!(material.deserialized::<Vec<u8>>().unwrap(), vec![4, 5, 6]);
     }
 
     /// Inserts a raw content blob, bypassing the store's encoding. Simulates

@@ -263,7 +263,6 @@ impl CanonicalAttributes {
         Self(attributes)
     }
 
-    #[allow(dead_code)]
     pub fn attributes(&self) -> &[Attribute] {
         &self.0
     }

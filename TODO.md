@@ -518,20 +518,16 @@ Ranked; being worked one at a time.
       `set_object_attributes_enforces_one_way_guarantees`; the rust-cryptoki
       `update_attributes_key` test (the suite's main `C_SetAttributeValue`
       consumer) still passes and the suite baseline is unchanged.
-- [ ] **`generate_key_pair` writes the two halves without a transaction** —
-      the private key row is inserted first, then the public one, as two
-      independent `INSERT`s. Under the crash-only policy a panic can abort the
-      process between them, leaving an orphaned private-key object that is
-      findable by label but has no public half. SQLite makes the fix cheap: a
-      store-level paired write (e.g. `write_pair`) that inserts both records
-      inside one transaction, threaded through `Session` and used by both
-      `generate_key_pair` arms. (Noted while deciding to keep SQLite: this is
-      exactly the kind of multi-object atomicity the database provides and a
-      flat-file store would have to reinvent.) Scope shrank with the
-      in-memory session-object move: only *token* keypairs hit the store, so
-      the crash window exists only for a pair generated with
-      `CKA_TOKEN = true` on both halves; a session keypair (nl-wallet's case)
-      involves no store writes at all.
+- [x] **`generate_key_pair` writes the two halves without a transaction** —
+      fixed with `ObjectStore::write_pair` (both `INSERT`s inside one
+      transaction) routed through `Session::write_object_pair`, used by both
+      `generate_key_pair` arms. When both halves are token objects the write
+      is transactional, so a crash-only abort between them can no longer leave
+      an orphaned single key; mixed and session pairs write independently, as
+      at most one half reaches the store and an in-memory half dies with the
+      process regardless of order. Covered by `write_pair_persists_both_halves`
+      (store) and `generate_token_key_pair_persists_both_halves` (hsm);
+      rust-cryptoki baseline unchanged, nl-wallet suite 5/5.
 - [x] **`C_Initialize` purges *all* session objects — a single-process
       assumption** — fixed by moving session objects to an in-memory
       per-slot store (`SessionObjects` in `session.rs`), matching SoftHSM

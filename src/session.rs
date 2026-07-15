@@ -208,6 +208,39 @@ impl Session {
         self.write_material(material, attributes)
     }
 
+    /// Writes a key pair. When both halves are token objects they are
+    /// persisted in one transaction, so a crash between the two writes cannot
+    /// leave an orphaned single key in the store. Otherwise the halves are
+    /// written independently: at most one reaches the persistent store, and
+    /// an in-memory half dies with the process regardless of write order.
+    pub fn write_object_pair<A, B>(
+        &self,
+        first: (&A, CanonicalAttributes),
+        second: (&B, CanonicalAttributes),
+    ) -> Result<(ObjectId, ObjectId), SessionError>
+    where
+        A: Serialize + ?Sized,
+        B: Serialize + ?Sized,
+    {
+        let (first_object, first_attributes) = first;
+        let (second_object, second_attributes) = second;
+        let first_material = Value::serialized(first_object).map_err(SessionError::MaterialEncoding)?;
+        let second_material = Value::serialized(second_object).map_err(SessionError::MaterialEncoding)?;
+
+        if is_token_object(first_attributes.attributes()) && is_token_object(second_attributes.attributes()) {
+            self.objects
+                .write_pair(
+                    (first_attributes.into_vec(), &first_material),
+                    (second_attributes.into_vec(), &second_material),
+                )
+                .map_err(SessionError::ObjectStore)
+        } else {
+            let first_id = self.write_material(first_material, first_attributes)?;
+            let second_id = self.write_material(second_material, second_attributes)?;
+            Ok((first_id, second_id))
+        }
+    }
+
     /// Routes a new object to its store: token objects (`CKA_TOKEN` true) are
     /// persisted, session objects go to the slot's in-memory store and are
     /// destroyed when this session closes.

@@ -785,6 +785,32 @@ fn ecdsa_sign_verify_roundtrip_and_tamper_detection() {
 }
 
 #[test]
+fn generate_token_key_pair_persists_both_halves() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // Both halves CKA_TOKEN true — the transactional store path.
+    let (public_key, private_key) = hsm
+        .generate_key_pair(
+            session,
+            &Mechanism::EcKeyPairGen,
+            vec![Attribute::Token(true)],
+            vec![Attribute::Token(true)],
+        )
+        .unwrap();
+
+    // Both handles denote persistent store objects, and both are usable.
+    assert!(!public_key.is_session_object());
+    assert!(!private_key.is_session_object());
+
+    let digest = [0x5Au8; 32];
+    hsm.sign_init(session, &Mechanism::Ecdsa, private_key).unwrap();
+    let signature = hsm.sign(session, &digest).unwrap();
+    hsm.verify_init(session, &Mechanism::Ecdsa, public_key).unwrap();
+    hsm.verify(session, &digest, &signature).unwrap();
+}
+
+#[test]
 fn ecdsa_verify_via_private_key_handle_derives_public_key() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
