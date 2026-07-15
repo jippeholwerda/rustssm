@@ -300,11 +300,13 @@ fn add_absent(attributes: &mut Vec<Attribute>, additions: Vec<Attribute>) {
 
 /// The boolean-attribute defaults that are used at object creation when
 /// the template omits them, keyed by object class. PKCS#11 fixes only
-/// `CKA_TOKEN` and `CKA_DERIVE` (both false); the rest are token-specific, and
-/// these are rustssm's documented choices — key material is private and
-/// sensitive by default, and usage flags are opt-in (an application enables the
-/// operations it needs). Applying these makes the stored attribute set complete
-/// so search and readback behave like SoftHSM's.
+/// `CKA_TOKEN` and `CKA_DERIVE` (both false); the rest are token-specific.
+/// Usage flags default to true, matching SoftHSM's measured behavior — usage
+/// flags are enforced (see `check_key_usage` in `hsm.rs`), so with opt-in
+/// defaults a template that omits a flag would silently produce an unusable
+/// key. `CKA_SENSITIVE` defaults to true (SoftHSM says false; rustssm stays
+/// on the safe side) and `CKA_EXTRACTABLE` to false. Applying these makes the
+/// stored attribute set complete so search and readback behave like SoftHSM's.
 pub(crate) fn default_boolean_attributes(class: ObjectClass) -> Vec<Attribute> {
     // `CKA_TOKEN` (session object) is common to every storage object.
     let mut defaults = vec![Attribute::Token(false), Attribute::Derive(false)];
@@ -312,28 +314,28 @@ pub(crate) fn default_boolean_attributes(class: ObjectClass) -> Vec<Attribute> {
     match class {
         ObjectClass::PublicKey => defaults.extend([
             Attribute::Private(false),
-            Attribute::Encrypt(false),
-            Attribute::Verify(false),
-            Attribute::Wrap(false),
+            Attribute::Encrypt(true),
+            Attribute::Verify(true),
+            Attribute::Wrap(true),
         ]),
         ObjectClass::PrivateKey => defaults.extend([
             Attribute::Private(true),
             Attribute::Sensitive(true),
             Attribute::Extractable(false),
-            Attribute::Decrypt(false),
-            Attribute::Sign(false),
-            Attribute::Unwrap(false),
+            Attribute::Decrypt(true),
+            Attribute::Sign(true),
+            Attribute::Unwrap(true),
         ]),
         ObjectClass::SecretKey => defaults.extend([
             Attribute::Private(true),
             Attribute::Sensitive(true),
             Attribute::Extractable(false),
-            Attribute::Encrypt(false),
-            Attribute::Decrypt(false),
-            Attribute::Sign(false),
-            Attribute::Verify(false),
-            Attribute::Wrap(false),
-            Attribute::Unwrap(false),
+            Attribute::Encrypt(true),
+            Attribute::Decrypt(true),
+            Attribute::Sign(true),
+            Attribute::Verify(true),
+            Attribute::Wrap(true),
+            Attribute::Unwrap(true),
         ]),
         // A classless object is degenerate (the creating path rejects unknown
         // classes); leave it as-is rather than guess a key's defaults.

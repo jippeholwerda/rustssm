@@ -128,6 +128,9 @@ pub enum HsmError {
     #[error("key handle invalid")]
     KeyHandleInvalid,
 
+    #[error("key does not permit this operation")]
+    KeyFunctionNotPermitted,
+
     #[error("key size out of range")]
     KeySizeRange,
 
@@ -769,6 +772,7 @@ impl Hsm {
         // preserving the current precedence.
         let wrapping_parts = ctx.object(&wrapping_key, HsmError::WrappingKeyHandleInvalid)?;
         let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
+        check_key_usage(&wrapping_parts.attributes, Attribute::Wrap(false))?;
 
         match mechanism {
             Mechanism::AesKeyWrapPad => {
@@ -802,6 +806,7 @@ impl Hsm {
         let template = Template::new(attributes).map_err(template_error)?;
 
         let unwrapping_parts = ctx.object(&unwrapping_key, HsmError::UnwrappingKeyHandleInvalid)?;
+        check_key_usage(&unwrapping_parts.attributes, Attribute::Unwrap(false))?;
         ctx.require_login_to_create(&template, template.class())?;
 
         match mechanism {
@@ -955,6 +960,7 @@ impl Hsm {
         }
 
         let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
+        check_key_usage(&key_parts.attributes, Attribute::Sign(false))?;
 
         let operation = match mechanism {
             Mechanism::RsaPkcs => {
@@ -1021,6 +1027,7 @@ impl Hsm {
         }
 
         let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
+        check_key_usage(&key_parts.attributes, Attribute::Verify(false))?;
 
         let operation = match mechanism {
             Mechanism::RsaPkcs => {
@@ -1086,6 +1093,7 @@ impl Hsm {
         }
 
         let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
+        check_key_usage(&key_parts.attributes, Attribute::Encrypt(false))?;
 
         match mechanism {
             Mechanism::AesGcm {
@@ -1147,6 +1155,7 @@ impl Hsm {
         }
 
         let key_parts = ctx.object(&key, HsmError::KeyHandleInvalid)?;
+        check_key_usage(&key_parts.attributes, Attribute::Decrypt(false))?;
 
         match mechanism {
             Mechanism::AesGcm {
@@ -1282,6 +1291,20 @@ fn store_read_error(error: SessionError, invalid: HsmError) -> HsmError {
         }
         _ => invalid,
     }
+}
+
+/// Usage-flag enforcement (`CKA_SIGN`, `CKA_ENCRYPT`, …): refuses the
+/// operation iff the key's stored attributes carry `denied` — the required
+/// flag with value false. Flags default to true at creation (see
+/// `default_boolean_attributes`), so only an explicit opt-out blocks; a flag
+/// the key's class does not define is absent and never blocks, which keeps
+/// the ECDSA verify-via-private-key-handle extension working (private keys
+/// carry no `CKA_VERIFY`).
+fn check_key_usage(attributes: &[Attribute], denied: Attribute) -> Result<()> {
+    if attributes.contains(&denied) {
+        return Err(HsmError::KeyFunctionNotPermitted);
+    }
+    Ok(())
 }
 
 /// Shared `C_SetAttributeValue`/`C_CopyObject` update loop, including the

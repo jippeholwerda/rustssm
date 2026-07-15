@@ -498,17 +498,30 @@ Ranked; being worked one at a time.
       "carries `CKA_VALUE`" — decide from the object's stored `CKA_CLASS`
       (public keys → type-invalid, secret/private keys → sensitive). Harmless
       in practice (clients treat both as "unavailable"); precision only.
-- [ ] **Usage flags are not enforced — decide and document** — `C_SignInit`
-      signs with a key whose `CKA_SIGN` is false, `C_EncryptInit` ignores
-      `CKA_ENCRYPT`, `C_WrapKey` ignores `CKA_WRAP`, etc.; the spec wants
-      `CKR_KEY_FUNCTION_NOT_PERMITTED`. This became *visible* (not new) when
-      class defaults landed: an unwrapped signing key now demonstrably stores
-      `CKA_SIGN = false` (nl-wallet's unwrap template omits it) and signing
-      still succeeds. Enforcing would therefore break nl-wallet's
-      `sign_wrapped` flow until their template adds `Sign(true)` — a
-      coordinated change. Until then, this is a deliberate non-feature; if
-      enforcement stays out, say so in the README error-policy/status section
-      the way other deviations are documented.
+- [x] **Usage flags are not enforced — decide and document** — resolved
+      2026-07-15 the compliant way, after measuring SoftHSM 2.6.1 (probe via
+      rust-cryptoki against the nix-store module): SoftHSM *enforces* the
+      flags (`CKR_KEY_FUNCTION_NOT_PERMITTED` on explicit false) but
+      *defaults omitted flags to true* — EC private key: Sign/Decrypt/Unwrap
+      true, Derive false, Sensitive false, Extractable false; AES secret key:
+      Sign/Verify/Encrypt/Decrypt/Wrap/Unwrap true, Derive/Sensitive/
+      Extractable false. The spec makes these defaults token-specific, so
+      nl-wallet's templates were never out of spec — they rely on permissive
+      defaults, and the wrapped-then-unwrapped key demonstrably gets
+      `CKA_SIGN = true` from the unwrap template's defaults on SoftHSM (flags
+      don't travel in the wrapped blob). rustssm now does the same: usage-flag
+      class defaults flipped to true (`CKA_SENSITIVE` stays true — safe-side
+      deviation from SoftHSM; `CKA_EXTRACTABLE`/`CKA_DERIVE` stay false), and
+      all six operation entry points enforce via `check_key_usage`
+      (sign/verify/encrypt/decrypt init + wrap/unwrap key), new
+      `HsmError::KeyFunctionNotPermitted` → `CKR_KEY_FUNCTION_NOT_PERMITTED`.
+      Enforcement blocks only an explicitly-false stored flag; an absent flag
+      (one the class doesn't define) never blocks, which keeps ECDSA
+      verify-via-private-key-handle working (private keys carry no
+      `CKA_VERIFY`). Covered by `operations_reject_keys_that_opt_out_of_usage`
+      and `unwrapped_key_gets_the_unwrap_templates_usage_defaults`; README
+      documents the policy. rust-cryptoki baseline unchanged, nl-wallet 5/5
+      (including `wrap_key_and_sign`).
 - [x] **`C_SetAttributeValue` skips the one-way guarantees** — the set path
       now enforces the same one-way guarantees as `C_CopyObject`:
       `CKA_SENSITIVE` true→false and `CKA_EXTRACTABLE` false→true are rejected

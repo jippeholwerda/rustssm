@@ -1178,6 +1178,114 @@ fn wrap_unwrap_roundtrip() {
 }
 
 #[test]
+fn operations_reject_keys_that_opt_out_of_usage() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+
+    // Usage flags default to true; an explicit false opts the key out of the
+    // operation (CKR_KEY_FUNCTION_NOT_PERMITTED, as on SoftHSM).
+    let no_sign = hsm
+        .generate_key(
+            session,
+            &Mechanism::GenericSecretKeyGen,
+            vec![Attribute::ValueLen(32), Attribute::Sign(false)],
+        )
+        .unwrap();
+    assert!(matches!(
+        hsm.sign_init(session, &Mechanism::Sha256Hmac, no_sign),
+        Err(HsmError::KeyFunctionNotPermitted)
+    ));
+
+    let opted_out = hsm
+        .generate_key(
+            session,
+            &Mechanism::AesKeyGen,
+            vec![
+                Attribute::ValueLen(32),
+                Attribute::Encrypt(false),
+                Attribute::Decrypt(false),
+                Attribute::Wrap(false),
+                Attribute::Unwrap(false),
+            ],
+        )
+        .unwrap();
+    let gcm = Mechanism::AesGcm {
+        initialization_vector: vec![0x24; 12],
+        additional_authenticated_data: vec![],
+    };
+    assert!(matches!(
+        hsm.encrypt_init(session, &gcm, opted_out.clone()),
+        Err(HsmError::KeyFunctionNotPermitted)
+    ));
+    assert!(matches!(
+        hsm.decrypt_init(session, &gcm, opted_out.clone()),
+        Err(HsmError::KeyFunctionNotPermitted)
+    ));
+
+    let payload = generate_secret_key(&hsm, session, 32, "payload");
+    assert!(matches!(
+        hsm.wrap_key(session, &Mechanism::AesKeyWrapPad, opted_out.clone(), payload.clone()),
+        Err(HsmError::KeyFunctionNotPermitted)
+    ));
+    let wrapped = hsm
+        .wrap_key(session, &Mechanism::AesKeyWrapPad, payload.clone(), payload)
+        .unwrap();
+    assert!(matches!(
+        hsm.unwrap_key(session, &Mechanism::AesKeyWrapPad, opted_out, &wrapped, vec![]),
+        Err(HsmError::KeyFunctionNotPermitted)
+    ));
+}
+
+#[test]
+fn unwrapped_key_gets_the_unwrap_templates_usage_defaults() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    let wrapping_key = generate_secret_key(&hsm, session, 32, "kek");
+
+    // Usage flags do not travel inside the wrapped blob: a Sign(false)
+    // original unwrapped with a template that omits CKA_SIGN gets the default
+    // true and may sign (matches SoftHSM's measured behavior).
+    let (_public, private) = hsm
+        .generate_key_pair(
+            session,
+            &Mechanism::EcKeyPairGen,
+            vec![],
+            vec![Attribute::Extractable(true), Attribute::Sign(false)],
+        )
+        .unwrap();
+    assert!(matches!(
+        hsm.sign_init(session, &Mechanism::Ecdsa, private.clone()),
+        Err(HsmError::KeyFunctionNotPermitted)
+    ));
+
+    let wrapped = hsm
+        .wrap_key(session, &Mechanism::AesKeyWrapPad, wrapping_key.clone(), private)
+        .unwrap();
+    let unwrapped = hsm
+        .unwrap_key(
+            session,
+            &Mechanism::AesKeyWrapPad,
+            wrapping_key,
+            &wrapped,
+            vec![
+                Attribute::Class(ObjectClass::PrivateKey),
+                Attribute::KeyType(KeyType::Ec),
+                Attribute::Private(true),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        hsm.object_attribute(session, unwrapped.clone(), AttributeType::Sign)
+            .unwrap(),
+        Some(Attribute::Sign(true))
+    );
+    hsm.sign_init(session, &Mechanism::Ecdsa, unwrapped).unwrap();
+    let signature = hsm.sign(session, &[0x5A; 32]).unwrap();
+    assert_eq!(signature.len(), 64);
+}
+
+#[test]
 fn unwrap_drops_untracked_template_attributes() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
@@ -1322,7 +1430,8 @@ fn write_paths_materialize_class_default_booleans() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
 
-    // A secret key whose template sets only length/label plus one explicit flag.
+    // A secret key whose template sets only length/label plus one explicit
+    // opt-out flag.
     let secret = hsm
         .generate_key(
             session,
@@ -1330,14 +1439,15 @@ fn write_paths_materialize_class_default_booleans() {
             vec![
                 Attribute::ValueLen(32),
                 Attribute::Label(String::from("k")),
-                Attribute::Sign(true),
+                Attribute::Sign(false),
             ],
         )
         .unwrap();
 
     let read = |id: &ObjectId, type_| hsm.object_attribute(session, id.clone(), type_).unwrap();
 
-    // The class defaults are materialized for the booleans the template omitted...
+    // The class defaults are materialized for the booleans the template
+    // omitted (usage flags true, following SoftHSM)...
     assert_eq!(read(&secret, AttributeType::Token), Some(Attribute::Token(false)));
     assert_eq!(read(&secret, AttributeType::Private), Some(Attribute::Private(true)));
     assert_eq!(
@@ -1348,17 +1458,17 @@ fn write_paths_materialize_class_default_booleans() {
         read(&secret, AttributeType::Extractable),
         Some(Attribute::Extractable(false))
     );
-    assert_eq!(read(&secret, AttributeType::Encrypt), Some(Attribute::Encrypt(false)));
+    assert_eq!(read(&secret, AttributeType::Encrypt), Some(Attribute::Encrypt(true)));
     assert_eq!(read(&secret, AttributeType::Derive), Some(Attribute::Derive(false)));
     // ...but an explicit template value is never overwritten by its default.
-    assert_eq!(read(&secret, AttributeType::Sign), Some(Attribute::Sign(true)));
+    assert_eq!(read(&secret, AttributeType::Sign), Some(Attribute::Sign(false)));
 
     // The now-complete stored list lets an equality search on a defaulted
     // attribute match — which the old presence-plus-equality match could not,
     // since the template never stored CKA_ENCRYPT.
     hsm.find_objects_init(
         session,
-        vec![Attribute::Label(String::from("k")), Attribute::Encrypt(false)],
+        vec![Attribute::Label(String::from("k")), Attribute::Encrypt(true)],
     )
     .unwrap();
     let found = hsm.find_objects_next(session, 10).unwrap();
@@ -1376,9 +1486,9 @@ fn write_paths_materialize_class_default_booleans() {
         )
         .unwrap();
     assert_eq!(read(&public, AttributeType::Private), Some(Attribute::Private(false)));
-    assert_eq!(read(&public, AttributeType::Verify), Some(Attribute::Verify(false)));
+    assert_eq!(read(&public, AttributeType::Verify), Some(Attribute::Verify(true)));
     assert_eq!(read(&private, AttributeType::Private), Some(Attribute::Private(true)));
-    assert_eq!(read(&private, AttributeType::Sign), Some(Attribute::Sign(false)));
+    assert_eq!(read(&private, AttributeType::Sign), Some(Attribute::Sign(true)));
 }
 
 #[test]

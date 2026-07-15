@@ -17,6 +17,12 @@ Implemented (and exercised by the rust-cryptoki test suite):
   (`CKR_USER_NOT_LOGGED_IN`); public objects are unrestricted. Secret and
   private keys default to `CKA_PRIVATE` true (so they need a login to use),
   public keys to false — set the attribute explicitly to override
+- Usage flags are enforced: initializing an operation with a key whose flag
+  (`CKA_SIGN`, `CKA_VERIFY`, `CKA_ENCRYPT`, `CKA_DECRYPT`, `CKA_WRAP`,
+  `CKA_UNWRAP`) is false fails with `CKR_KEY_FUNCTION_NOT_PERMITTED`. A flag
+  omitted from the creation template defaults to true, matching SoftHSM —
+  usage is opt-out, not opt-in. (`CKA_SENSITIVE` defaults to true, where
+  SoftHSM says false; `CKA_EXTRACTABLE` and `CKA_DERIVE` default to false)
 - Key generation: `CKM_GENERIC_SECRET_KEY_GEN`, `CKM_AES_KEY_GEN`,
   `CKM_RSA_PKCS_KEY_PAIR_GEN`, `CKM_EC_KEY_PAIR_GEN` (P-256)
 - Sign/verify: `CKM_RSA_PKCS`, `CKM_ECDSA`, `CKM_SHA256_HMAC` (single-part)
