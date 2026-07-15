@@ -711,9 +711,15 @@ impl Hsm {
                     Attribute::PublicExponent(public_key.e_bytes().to_vec()),
                     Attribute::ModulusBits(public_key.n().bits() as u64),
                 ]);
+                // The private key carries the pair's public metadata too
+                // (`CKA_MODULUS` and friends are spec-defined RSA private-key
+                // attributes, and clients read them to size buffers).
                 let private_key_attributes = private_template.merge(vec![
                     Attribute::Class(ObjectClass::PrivateKey),
                     Attribute::KeyType(KeyType::Rsa),
+                    Attribute::Modulus(public_key.n_bytes().to_vec()),
+                    Attribute::PublicExponent(public_key.e_bytes().to_vec()),
+                    Attribute::ModulusBits(public_key.n().bits() as u64),
                 ]);
 
                 let session = ctx.session();

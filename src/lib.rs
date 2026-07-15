@@ -1299,6 +1299,17 @@ pub unsafe extern "C" fn C_GetAttributeValue(
                 continue;
             }
 
+            // Private-key components rustssm never serves: like a secret
+            // key's `CKA_VALUE` below, these exist on the object but are
+            // withheld as sensitive rather than being unknown types. (Keyed
+            // on the attribute type alone, like `CKA_VALUE` — see TODO.md on
+            // that deliberate imprecision.)
+            if PRIVATE_KEY_COMPONENTS.contains(&attr.type_) {
+                attr.ulValueLen = raw::CK_UNAVAILABLE_INFORMATION;
+                result = Err(raw::CKR_ATTRIBUTE_SENSITIVE);
+                continue;
+            }
+
             let Some(attribute_type) = attribute_type_from_raw(attr.type_) else {
                 attr.ulValueLen = raw::CK_UNAVAILABLE_INFORMATION;
                 result = Err(raw::CKR_ATTRIBUTE_TYPE_INVALID);
@@ -1716,6 +1727,18 @@ fn attribute_type_from_raw(type_: raw::CK_ATTRIBUTE_TYPE) -> Option<AttributeTyp
         _ => return None,
     })
 }
+
+/// RSA private-key components (`CKA_PRIVATE_EXPONENT`, CRT parameters).
+/// `C_GetAttributeValue` reports them as withheld-sensitive
+/// (`CKR_ATTRIBUTE_SENSITIVE`); they are never stored as readable attributes.
+const PRIVATE_KEY_COMPONENTS: [raw::CK_ATTRIBUTE_TYPE; 6] = [
+    raw::CKA_PRIVATE_EXPONENT,
+    raw::CKA_PRIME_1,
+    raw::CKA_PRIME_2,
+    raw::CKA_EXPONENT_1,
+    raw::CKA_EXPONENT_2,
+    raw::CKA_COEFFICIENT,
+];
 
 /// Attributes that every object reports as present but empty. Clients (and the
 /// rust-cryptoki suite) expect these to be available rather than absent, even

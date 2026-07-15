@@ -2076,14 +2076,14 @@ fn generated_aes_keys_are_searchable_by_synthesized_and_template_attributes() {
 }
 
 #[test]
-fn generated_rsa_public_key_exposes_derived_attributes() {
+fn generated_rsa_key_pair_exposes_derived_attributes() {
     use crate::attribute::KeyType;
     use crate::attribute::ObjectClass;
 
     let hsm = hsm_with_token();
     let session = user_session(&hsm);
 
-    let (public_key, _private_key) = hsm
+    let (public_key, private_key) = hsm
         .generate_key_pair(
             session,
             &Mechanism::RsaPkcsKeyPairGen,
@@ -2119,6 +2119,24 @@ fn generated_rsa_public_key_exposes_derived_attributes() {
         panic!("public key should expose a modulus");
     };
     assert_eq!(modulus.len(), 256);
+
+    // The private half carries the pair's public metadata too — spec-defined
+    // RSA private-key attributes, read e.g. to size signature buffers.
+    assert_eq!(
+        hsm.object_attribute(session, private_key.clone(), AttributeType::Modulus)
+            .unwrap(),
+        Some(Attribute::Modulus(modulus))
+    );
+    assert_eq!(
+        hsm.object_attribute(session, private_key.clone(), AttributeType::PublicExponent)
+            .unwrap(),
+        Some(Attribute::PublicExponent(vec![0x01, 0x00, 0x01]))
+    );
+    assert_eq!(
+        hsm.object_attribute(session, private_key, AttributeType::ModulusBits)
+            .unwrap(),
+        Some(Attribute::ModulusBits(2048))
+    );
 }
 
 #[test]

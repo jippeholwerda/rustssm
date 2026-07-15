@@ -27,9 +27,16 @@ attribute rejection unlocked `unique_id`; `C_CopyObject` unlocked
       (SoftHSM-compatible; the same guard covers `C_GenerateKey(Pair)` and
       `C_UnwrapKey`). Validated against `p11tool --write --secret-key`,
       `pkcs11-tool --write-object --type privkey` (import + sign), and the
-      `import_export`/`unique_id` tests. Still TODO: RSA private keys.
+      `import_export`/`unique_id` tests. RSA private key import: decided
+      2026-07-15 not to implement until a consumer appears — no test in any
+      suite imports one (the suite's two RSA `create_object` templates are
+      public keys), nl-wallet is EC/AES/HMAC-only, and the devenv provisioning
+      imports AES/EC only; it would add attribute variants and `CKA_PRIVATE_
+      EXPONENT`/prime parsing that nothing exercises.
       → `aes_cbc_encrypt`, `aes_cbc_pad_encrypt`, `validation`,
       `aes_cmac_sign`, `aes_cmac_verify`, `ekdf_aes_cbc_encrypt_data`
+      (these create AES keys via `C_CreateObject` but still fail on their
+      CBC/CMAC/EKDF mechanisms)
 - [x] Attribute storage and readback — each object persists its full typed
       attribute list (the template merged with token-synthesized class/key
       type and derived modulus/exponent/EC point), served from
@@ -38,9 +45,13 @@ attribute rejection unlocked `unique_id`; `C_CopyObject` unlocked
       report present-but-empty. `CKA_VALUE` of a secret key stays unavailable
       (sensitive). → `get_attributes_test`, `aes_key_attributes_test`,
       `generate_generic_secret_key`, `import_export`, `session_find_objects`,
-      `session_objecthandle_iterator`, `unique_id`. Remaining readback gap:
-      `get_attribute_info_test` (needs `CKA_MODULUS` on a generated private key
-      + sensitivity reporting).
+      `session_objecthandle_iterator`, `unique_id`. Readback gap closed
+      2026-07-15 → `get_attribute_info_test`: a generated RSA private key now
+      also stores the pair's `CKA_MODULUS`/`CKA_PUBLIC_EXPONENT`/
+      `CKA_MODULUS_BITS`, and the RSA private-key components
+      (`CKA_PRIVATE_EXPONENT`, primes, CRT parameters) report
+      `CKR_ATTRIBUTE_SENSITIVE` — keyed on the attribute type alone, the same
+      deliberate imprecision as `CKA_VALUE` (see section 4). Baseline 44 → 45.
 - [x] `C_CopyObject` → `session_copy_object`. Duplicates the source's key
       material into a new object; the template overrides attributes under the
       `C_SetAttributeValue` rules (identity/key-material read-only,
