@@ -2019,6 +2019,37 @@ fn set_object_attributes_updates_readable_value() {
 }
 
 #[test]
+fn set_object_attributes_enforces_one_way_guarantees() {
+    let hsm = hsm_with_token();
+    let session = user_session(&hsm);
+    // Secret-key class defaults: CKA_SENSITIVE true, CKA_EXTRACTABLE false —
+    // both in their protected state.
+    let key = generate_secret_key(&hsm, session, 32, "one-way");
+
+    assert!(matches!(
+        hsm.set_object_attributes(session, key.clone(), vec![Attribute::Sensitive(false)]),
+        Err(HsmError::AttributeReadOnly)
+    ));
+    assert!(matches!(
+        hsm.set_object_attributes(session, key.clone(), vec![Attribute::Extractable(true)]),
+        Err(HsmError::AttributeReadOnly)
+    ));
+
+    // Re-asserting the protected state is not a downgrade.
+    hsm.set_object_attributes(
+        session,
+        key.clone(),
+        vec![Attribute::Sensitive(true), Attribute::Extractable(false)],
+    )
+    .unwrap();
+
+    assert_eq!(
+        hsm.object_attribute(session, key, AttributeType::Sensitive).unwrap(),
+        Some(Attribute::Sensitive(true))
+    );
+}
+
+#[test]
 fn set_object_attributes_rejects_read_only_and_unknown() {
     let hsm = hsm_with_token();
     let session = user_session(&hsm);

@@ -509,14 +509,15 @@ Ranked; being worked one at a time.
       coordinated change. Until then, this is a deliberate non-feature; if
       enforcement stays out, say so in the README error-policy/status section
       the way other deviations are documented.
-- [ ] **`C_SetAttributeValue` skips the one-way guarantees** — the set path
-      calls `apply_attribute_updates(.., enforce_one_way: false)`, so
-      `CKA_SENSITIVE` true→false and `CKA_EXTRACTABLE` false→true are allowed
-      through an attribute update even though `C_CopyObject` forbids exactly
-      those transitions (and SoftHSM forbids them on set too). Fix is
-      one argument (`true`) in `set_object_attributes` plus a test; check the
-      rust-cryptoki `update_attributes_key` test still passes, since that is
-      the suite's main `C_SetAttributeValue` consumer.
+- [x] **`C_SetAttributeValue` skips the one-way guarantees** — the set path
+      now enforces the same one-way guarantees as `C_CopyObject`:
+      `CKA_SENSITIVE` true→false and `CKA_EXTRACTABLE` false→true are rejected
+      with `CKR_ATTRIBUTE_READ_ONLY` (matching SoftHSM). With both callers
+      enforcing, the `enforce_one_way` flag on `apply_attribute_updates` was
+      dead and removed. Covered by
+      `set_object_attributes_enforces_one_way_guarantees`; the rust-cryptoki
+      `update_attributes_key` test (the suite's main `C_SetAttributeValue`
+      consumer) still passes and the suite baseline is unchanged.
 - [ ] **`generate_key_pair` writes the two halves without a transaction** —
       the private key row is inserted first, then the public one, as two
       independent `INSERT`s. Under the crash-only policy a panic can abort the

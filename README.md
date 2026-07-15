@@ -27,7 +27,7 @@ Implemented (and exercised by the rust-cryptoki test suite):
   keys via `CKA_VALUE`; token-managed read-only attributes like `CKA_UNIQUE_ID`
   in a template are rejected),
   `C_CopyObject` (duplicates key material; template overrides follow the
-  set-attribute rules plus the sensitive/extractable one-way guarantees),
+  set-attribute rules),
   `C_FindObjects*` (matching any combination of stored attributes),
   `C_DestroyObject`
 - Attribute readback: `C_GetAttributeValue` serves the object's stored
@@ -37,7 +37,9 @@ Implemented (and exercised by the rust-cryptoki test suite):
   …)
 - Attribute modification: `C_SetAttributeValue` updates modifiable
   attributes (usage/policy flags, label, id); identity and key-material
-  attributes are rejected as read-only, unknown types as invalid
+  attributes are rejected as read-only, unknown types as invalid. Both set
+  and copy enforce the one-way guarantees: a sensitive key cannot be made
+  non-sensitive, a non-extractable key cannot be made extractable
 - `C_GenerateRandom` / `C_SeedRandom`
 
 Token objects and token state (label, initialized flag, and salted-hashed

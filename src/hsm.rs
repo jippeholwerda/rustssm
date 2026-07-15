@@ -866,8 +866,10 @@ impl Hsm {
 
     /// Applies a `C_SetAttributeValue` update: each attribute replaces (or
     /// adds) the object's value of that type. Untracked attribute types are
-    /// rejected as invalid, and identity/key-material attributes as read-only.
-    /// Token objects can only be modified in a read/write session.
+    /// rejected as invalid, and identity/key-material attributes as read-only,
+    /// as are the one-way downgrades (sensitive → non-sensitive,
+    /// non-extractable → extractable). Token objects can only be modified in
+    /// a read/write session.
     pub fn set_object_attributes(
         &self,
         session_id: SessionId,
@@ -885,7 +887,7 @@ impl Hsm {
             return Err(HsmError::AttributeReadOnly);
         }
 
-        apply_attribute_updates(&mut attributes, updates, false)?;
+        apply_attribute_updates(&mut attributes, updates)?;
         let session = ctx.session();
         session
             .set_object_attributes(&object, CanonicalAttributes::from_persisted(attributes))
@@ -895,14 +897,13 @@ impl Hsm {
     /// Copies an object, applying a template of attribute overrides to the
     /// copy. Overrides follow the same rules as `C_SetAttributeValue`
     /// (identity/key-material attributes are read-only, untracked/token-managed
-    /// types are invalid) plus the one-way guarantees that a sensitive key may
-    /// not be made non-sensitive and a non-extractable key may not be made
-    /// extractable. The copy shares the source's key material.
+    /// types are invalid, one-way guarantees are enforced). The copy shares
+    /// the source's key material.
     pub fn copy_object(&self, session_id: SessionId, source: ObjectId, overrides: Vec<Attribute>) -> Result<ObjectId> {
         let ctx = self.session_context(session_id)?;
         let mut attributes = ctx.object(&source, HsmError::ObjectHandleInvalid)?.attributes;
         let overrides = Template::new(overrides).map_err(template_error)?.into_vec();
-        apply_attribute_updates(&mut attributes, overrides, true)?;
+        apply_attribute_updates(&mut attributes, overrides)?;
         require_login_for_private(&attributes, ctx.logged_in_as_user)?;
         ctx.check_writable(&attributes)?;
         let session = ctx.session();
@@ -1283,14 +1284,10 @@ fn store_read_error(error: SessionError, invalid: HsmError) -> HsmError {
     }
 }
 
-/// Shared `C_SetAttributeValue`/`C_CopyObject` update loop; `enforce_one_way`
-/// adds the sensitive/extractable one-way guarantees (copy only — preserves
-/// current `set_object_attributes` behavior, which does not enforce them).
-fn apply_attribute_updates(
-    attributes: &mut Vec<Attribute>,
-    updates: Vec<Attribute>,
-    enforce_one_way: bool,
-) -> Result<()> {
+/// Shared `C_SetAttributeValue`/`C_CopyObject` update loop, including the
+/// one-way guarantees: a sensitive key may not be made non-sensitive and a
+/// non-extractable key may not be made extractable.
+fn apply_attribute_updates(attributes: &mut Vec<Attribute>, updates: Vec<Attribute>) -> Result<()> {
     for update in updates {
         let attribute_type = update.attribute_type().ok_or(HsmError::AttributeTypeInvalid)?;
 
@@ -1298,7 +1295,7 @@ fn apply_attribute_updates(
             return Err(HsmError::AttributeReadOnly);
         }
 
-        if enforce_one_way && forbidden_downgrade(attributes, &update) {
+        if forbidden_downgrade(attributes, &update) {
             return Err(HsmError::AttributeReadOnly);
         }
 
