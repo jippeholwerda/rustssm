@@ -192,7 +192,7 @@ pub struct TokenStatus {
 }
 
 pub struct Hsm {
-    slots: RwLock<HashMap<SlotId, Arc<RwLock<Slot>>>>,
+    slots: HashMap<SlotId, Arc<RwLock<Slot>>>,
     object_store: OnceLock<Arc<ObjectStore>>,
     next_session_id: AtomicU64,
     initialized: AtomicBool,
@@ -203,10 +203,7 @@ impl Default for Hsm {
         // rustssm exposes a single token. PKCS#11 is slot-addressed, so the slot
         // is still keyed by `SlotId`, but there is exactly one.
         Self {
-            slots: RwLock::new(HashMap::from_iter([(
-                SlotId(0),
-                Arc::new(RwLock::new(Slot::default())),
-            )])),
+            slots: HashMap::from_iter([(SlotId(0), Arc::new(RwLock::new(Slot::default())))]),
             object_store: OnceLock::new(),
             next_session_id: AtomicU64::new(1),
             initialized: AtomicBool::new(false),
@@ -248,8 +245,7 @@ impl Hsm {
         let tokens = store.load_tokens().map_err(HsmError::ObjectStore)?;
         let by_slot: HashMap<u64, TokenRecord> = tokens.into_iter().map(|token| (token.slot_id, token)).collect();
 
-        let slots = self.slots.read().unwrap();
-        for (slot_id, slot_lock) in slots.iter() {
+        for (slot_id, slot_lock) in self.slots.iter() {
             let mut slot = slot_lock.write().unwrap();
             match by_slot.get(&slot_id.0) {
                 Some(record) => {
@@ -276,10 +272,9 @@ impl Hsm {
             return Err(HsmError::NotInitialized);
         }
 
-        let slots = self.slots.read().unwrap();
-        for slot_lock in slots.values() {
+        for slot_lock in self.slots.values() {
             let mut slot = slot_lock.write().unwrap();
-            slot.sessions.write().unwrap().clear();
+            slot.sessions.clear();
             slot.session_objects.write().unwrap().clear();
             slot.current_user_type = None;
         }
@@ -310,7 +305,7 @@ impl Hsm {
 
     pub fn slot_ids(&self) -> Result<Vec<u64>> {
         self.ensure_initialized()?;
-        let mut ids: Vec<u64> = self.slots.read().unwrap().keys().map(|id| id.0).collect();
+        let mut ids: Vec<u64> = self.slots.keys().map(|id| id.0).collect();
         ids.sort_unstable();
         Ok(ids)
     }
@@ -322,7 +317,7 @@ impl Hsm {
     pub fn token_status(&self, slot_id: SlotId) -> Result<TokenStatus> {
         let slot_lock = self.get_slot(&slot_id)?;
         let slot = slot_lock.read().unwrap();
-        let session_count = slot.sessions.read().unwrap().len();
+        let session_count = slot.sessions.len();
 
         Ok(TokenStatus {
             label: slot.label.clone(),
@@ -337,7 +332,7 @@ impl Hsm {
         let slot_lock = self.get_slot(slot_id)?;
         let mut slot = slot_lock.write().unwrap();
 
-        if !slot.sessions.read().unwrap().is_empty() {
+        if !slot.sessions.is_empty() {
             return Err(HsmError::SessionExists(*slot_id));
         }
 
@@ -370,7 +365,7 @@ impl Hsm {
     pub fn open_session(&self, slot_id: SlotId, state: SessionState) -> Result<SessionId> {
         let store = self.object_store()?;
         let slot_lock = self.get_slot(&slot_id)?;
-        let slot = slot_lock.read().unwrap();
+        let mut slot = slot_lock.write().unwrap();
 
         // While the SO is logged in, no read-only session may be opened.
         if matches!(state, SessionState::ReadOnly) && slot.current_user_type == Some(UserType::So) {
@@ -379,10 +374,7 @@ impl Hsm {
 
         let session_id = SessionId(self.next_session_id.fetch_add(1, Ordering::Relaxed));
         let session = Session::new(session_id, slot_id, state, store, slot.session_objects.clone());
-        slot.sessions
-            .write()
-            .unwrap()
-            .insert(session_id, Arc::new(RwLock::new(session)));
+        slot.sessions.insert(session_id, Arc::new(RwLock::new(session)));
         Ok(session_id)
     }
 
@@ -393,14 +385,10 @@ impl Hsm {
             .ok_or(HsmError::SessionNotFound(session_id))?;
 
         let mut slot = slot_lock.write().unwrap();
-        let no_sessions_left = {
-            let mut sessions = slot.sessions.write().unwrap();
-            sessions.remove(&session_id);
-            sessions.is_empty()
-        };
+        slot.sessions.remove(&session_id);
 
         // When the last session with a token closes, the login state resets.
-        if no_sessions_left {
+        if slot.sessions.is_empty() {
             slot.current_user_type = None;
         }
         let session_objects = slot.session_objects.clone();
@@ -1240,17 +1228,15 @@ impl Hsm {
 
     fn get_slot(&self, slot_id: &SlotId) -> Result<Arc<RwLock<Slot>>> {
         self.ensure_initialized()?;
-        let slots = self.slots.read().unwrap();
-        let slot = slots.get(slot_id).ok_or(HsmError::SlotNotFound(*slot_id))?;
+        let slot = self.slots.get(slot_id).ok_or(HsmError::SlotNotFound(*slot_id))?;
         Ok(Arc::clone(slot))
     }
 
     fn find_by_session_id(&self, session_id: SessionId) -> Option<Arc<RwLock<Slot>>> {
-        let slots = self.slots.read().unwrap();
-        slots
-            .iter()
-            .find(|(_slot_id, slot)| slot.read().unwrap().sessions.read().unwrap().contains_key(&session_id))
-            .map(|(_id, slot)| Arc::clone(slot))
+        self.slots
+            .values()
+            .find(|slot| slot.read().unwrap().sessions.contains_key(&session_id))
+            .map(Arc::clone)
     }
 
     fn get_session_and_slot(&self, session_id: SessionId) -> Result<SessionAndSlot> {
@@ -1264,8 +1250,6 @@ impl Hsm {
             .read()
             .unwrap()
             .sessions
-            .read()
-            .unwrap()
             .get(&session_id)
             .cloned()
             .ok_or(HsmError::SessionNotFound(session_id))?;
@@ -1286,8 +1270,6 @@ impl Hsm {
 
         let session = slot
             .sessions
-            .read()
-            .unwrap()
             .get(&session_id)
             .cloned()
             .ok_or(HsmError::SessionNotFound(session_id))?;

@@ -179,13 +179,19 @@ pairs), which together with WAL is what the crash-only policy leans on.
 There is no global lock: every `C_*` call runs concurrently and takes only
 the locks it needs. Those locks form a fixed hierarchy, from coarse to fine:
 
-1. the slot map (`Hsm.slots`, `RwLock`) — which slots exist;
-2. one slot (`RwLock<Slot>`) — token state, login;
-3. the slot's session map (`Slot.sessions`, `RwLock`) — which sessions exist;
-4. one session (`RwLock<Session>`) — the active operation, search state;
-5. the **leaves**: the store's connection `Mutex` and the slot's
+1. one slot (`RwLock<Slot>`) — token state, login, and the slot's session
+   map (opening/closing a session takes the write lock, lookups the read
+   lock);
+2. one session (`RwLock<Session>`) — the active operation, search state;
+3. the **leaves**: the store's connection `Mutex` and the slot's
    session-object map. Leaf locks are only ever taken last, with nothing
    taken after them.
+
+(The slot map itself — `Hsm.slots` — is fixed at construction and never
+mutated, so it needs no lock at all; only slot *contents* change. Similarly,
+`Hsm.object_store` is a `OnceLock` only to defer the fallible database open
+to `C_Initialize` — after that it is a plain atomic load, not a contended
+lock.)
 
 Two rules keep this deadlock-free:
 
@@ -193,7 +199,7 @@ Two rules keep this deadlock-free:
   cycle — thread A holds lock X and wants Y while thread B holds Y and wants
   X. If every thread acquires locks only downward through the same total
   order, no cycle can form. So code that has a session guard must not reach
-  back up to the slot map; anything it needs from higher levels is captured
+  back up to a slot; anything it needs from higher levels is captured
   *before* descending.
 - **Never take the same lock twice in one call, even for reading.**
   `std::sync::RwLock` is not reentrant: if a thread holding a read guard

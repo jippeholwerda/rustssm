@@ -23,7 +23,9 @@ pub struct Slot {
     pub so_pin: Option<PinHash>,
     pub user_pin: Option<PinHash>,
     pub current_user_type: Option<UserType>,
-    pub sessions: RwLock<HashMap<SessionId, Arc<RwLock<Session>>>>,
+    /// Guarded by the slot's own lock like every other field: opening or
+    /// closing a session takes the slot write lock, lookups the read lock.
+    pub sessions: HashMap<SessionId, Arc<RwLock<Session>>>,
     /// The slot's in-memory session objects, shared with every session opened
     /// on it (each `Session` holds a clone of the `Arc`).
     pub session_objects: Arc<RwLock<SessionObjects>>,
@@ -37,7 +39,7 @@ impl Default for Slot {
             so_pin: None,
             user_pin: None,
             current_user_type: None,
-            sessions: RwLock::new(HashMap::default()),
+            sessions: HashMap::default(),
             session_objects: Arc::new(RwLock::new(SessionObjects::default())),
         }
     }
@@ -46,8 +48,6 @@ impl Default for Slot {
 impl Slot {
     pub fn has_read_only_session(&self) -> bool {
         self.sessions
-            .read()
-            .unwrap()
             .iter()
             .any(|(_, session)| matches!(session.read().unwrap().state, SessionState::ReadOnly))
     }
