@@ -4,6 +4,9 @@ A Rust-based software HSM exposing a PKCS#11 (Cryptoki) interface, in the
 spirit of [SoftHSM](https://github.com/opendnssec/SoftHSMv2). Builds a
 `cdylib` (`librustssm.so`) that PKCS#11 clients load directly.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the software architecture (C4
+model) and the design decisions behind it.
+
 ## Status
 
 Implemented (and exercised by the rust-cryptoki test suite):
