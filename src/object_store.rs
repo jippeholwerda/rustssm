@@ -199,6 +199,17 @@ impl ObjectStore {
         let path = url.strip_prefix("sqlite://").unwrap_or(&url);
         let path = path.split('?').next().unwrap_or(path);
 
+        // `:memory:` selects a private in-memory store: no file is created and
+        // all state is lost when the process exits. The single connection is
+        // held for the process lifetime, so token state still survives
+        // C_Finalize/C_Initialize cycles — but nothing is shared with other
+        // processes, so a token must be provisioned in-process (via the PKCS#11
+        // API), not with the rustssm-util CLI.
+        if path == ":memory:" {
+            info!("object store: in-memory (state is not persisted)");
+            return Self::in_memory();
+        }
+
         info!(
             "object store: {} (cwd: {})",
             path,
@@ -221,7 +232,10 @@ impl ObjectStore {
         })
     }
 
-    #[cfg(test)]
+    /// Opens a private in-memory store. Selected in production by
+    /// `RUSTSSM_DATABASE_URL=:memory:` (see [`ObjectStore::new`]) and used
+    /// directly by tests. WAL and a busy timeout do not apply to an in-memory
+    /// database, so neither is set.
     pub fn in_memory() -> Result<Self, ObjectStoreError> {
         let connection = Connection::open_in_memory().map_err(ObjectStoreError::Database)?;
         apply_schema(&connection)?;

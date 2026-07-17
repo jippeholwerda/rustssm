@@ -64,6 +64,15 @@ when the session that created them closes, and cannot outlive the process —
 short-lived key material never touches disk, and processes sharing one
 database cannot interfere with each other's session objects.
 
+Set `RUSTSSM_DATABASE_URL=:memory:` (or `sqlite://:memory:`) for a private
+in-memory store instead: no file is created and all state is lost when the
+process exits, though token state still survives `C_Finalize`/`C_Initialize`
+cycles within the process. Because the in-memory database is private to the
+process, a token must be provisioned in-process through the PKCS#11 API — the
+`rustssm-util` CLI runs in a separate process and cannot seed it. This suits
+isolated, throwaway instances (e.g. one per parallel test) with no `rustssm.db`
+file contention.
+
 Set `RUSTSSM_LOG=debug` (or `error`/`warn`/`info`/`trace`) to log all calls
 and error returns to stderr, including the resolved database path.
 
